@@ -8,11 +8,12 @@ This repository contains the `repobird-leadgen` tool, a Python CLI application d
 
 ### Installation
 
-1.  Navigate to the tool's directory:
+1.  Create and activate a virtual environment using `uv` (assuming you are in the project root):
     ```bash
-    cd repobird-leadgen
+    uv venv
+    source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
     ```
-2.  Install the tool and its dependencies using `uv` (recommended) or `pip`:
+2.  Install the tool and its dependencies:
     ```bash
     uv pip install -e .
     ```
@@ -21,9 +22,13 @@ This repository contains the `repobird-leadgen` tool, a Python CLI application d
 
 `repobird-leadgen` requires a GitHub Personal Access Token (PAT) to interact with the GitHub API.
 
-1.  Create a file named `.env` inside the `repobird-leadgen` directory.
-2.  Add your GitHub PAT to the `.env` file:
+1.  Copy the example environment file:
+    ```bash
+    cp .env.example .env
+    ```
+2.  Edit the newly created `.env` file and add your GitHub PAT:
     ```dotenv
+    # .env
     GITHUB_TOKEN=your_github_pat_here
     ```
 

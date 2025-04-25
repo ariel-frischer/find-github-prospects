@@ -9,6 +9,11 @@ fix:
 
 # Run tests using pytest
 test:
-	pytest tests/
+	PYTHONPATH=. pytest tests/
 
-.PHONY: install-dev fix test
+# Run an example search command
+run:
+	@echo "Running example search (last 10 days, min 200 stars)..."
+	@.venv/bin/repobird-leadgen search --label "good first issue" --language python --max-results 10 --recent-days 10 --min-stars 200
+
+.PHONY: install-dev fix test run-search-example

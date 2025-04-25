@@ -1,16 +1,21 @@
 from __future__ import annotations
-from typing import List
-from github import Github, Auth  # Added Auth
+from typing import List, Iterator, Optional # Added Iterator, Optional
+import random # For jitter
+from github import Github, Auth
 from github.Repository import Repository
 from tqdm import tqdm
 from .config import GITHUB_TOKEN
-from datetime import datetime, timedelta, timezone  # Changed import datetime
+from datetime import datetime, timedelta, timezone
 import time
-import github  # Explicitly import github module for exception handling
+import json # For saving raw data incrementally
+from pathlib import Path # For cache file path handling
+import github
+from github import RateLimitExceededException, GithubException, UnknownObjectException # Removed BadGatewayException
 
 
-_QUERY_TEMPLATE = (
-    "label:{label} archived:false fork:false stars:>={min_stars}"
+# Base query for repositories, label is handled separately
+_REPO_QUERY_TEMPLATE = (
+    "archived:false fork:false stars:>={min_stars}"
     " language:{language} pushed:>{pushed_after}"
 )
 
@@ -23,154 +28,257 @@ class GitHubSearcher:
         auth = Auth.Token(token or GITHUB_TOKEN)
         self.gh = Github(
             auth=auth, per_page=100, retry=5, timeout=15
-        )  # Use Auth.Token, add retry and timeout
+        )
 
-    def _build_query(
-        self, *, label: str, language: str, min_stars: int, recent_days: int
+    def _build_repo_query(
+        self, *, language: str, min_stars: int, recent_days: int
     ) -> str:
-        # Calculate date for 'pushed_after' using timezone-aware UTC time
-        pushed_after_date = datetime.now(timezone.utc) - timedelta(
-            days=recent_days
-        )  # Use timezone.utc
-        pushed_after_str = pushed_after_date.strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )  # ISO 8601 format
-        return _QUERY_TEMPLATE.format(
-            label=f'"{label}"',  # Quote label if it contains spaces
+        """Builds the query for the initial repository search (without label)."""
+        pushed_after_date = datetime.now(timezone.utc) - timedelta(days=recent_days)
+        pushed_after_str = pushed_after_date.strftime("%Y-%m-%d")
+        return _REPO_QUERY_TEMPLATE.format(
             language=language,
             min_stars=min_stars,
             pushed_after=pushed_after_str,
         )
 
+    def _has_open_issue_with_label(self, repo: Repository, label: str) -> bool:
+        """Checks if a repository has at least one open issue with the given label."""
+        # Quote the label if it contains spaces
+        safe_label = f'"{label}"' if " " in label else label
+        issue_query = f"repo:{repo.full_name} is:issue is:open label:{safe_label}"
+        try:
+            # Search for just one issue to confirm existence
+            issues = self.gh.search_issues(query=issue_query)
+            return issues.totalCount > 0
+        except RateLimitExceededException:
+            print(f"Rate limit hit checking issues for {repo.full_name}. Waiting...")
+            self._wait_for_rate_limit_reset("core") # Check 'core' limit for issues
+            # Retry after waiting
+            try:
+                 issues = self.gh.search_issues(query=issue_query)
+                 return issues.totalCount > 0
+            except RateLimitExceededException:
+                 print(f"Rate limit hit again after waiting for {repo.full_name}. Skipping repo.")
+                 return False
+            except GithubException as ge_retry:
+                 print(f"GitHub error checking issues for {repo.full_name} after retry: {ge_retry}. Skipping.")
+                 return False
+        except GithubException as ge:
+            # Handle potential 422 errors if the query is complex or repo is weird
+            print(f"GitHub error checking issues for {repo.full_name}: {ge}. Skipping.")
+            return False
+        except Exception as e:
+            print(f"Unexpected error checking issues for {repo.full_name}: {e}. Skipping.")
+            return False
+
+    def _wait_for_rate_limit_reset(
+        self,
+        limit_type: str = "search",
+        exception: Optional[RateLimitExceededException] = None
+    ):
+        """
+        Waits until the GitHub API rate limit is reset, prioritizing Retry-After header.
+        """
+        wait_seconds = 60 # Default wait if everything else fails
+
+        # 1. Check Retry-After header (often present for secondary limits)
+        if exception and "Retry-After" in exception.headers:
+            try:
+                wait_seconds = int(exception.headers["Retry-After"]) + 5 # Add buffer
+                print(f"Using Retry-After header: waiting {wait_seconds:.0f} seconds.")
+                time.sleep(wait_seconds)
+                return
+            except (ValueError, TypeError):
+                print("Could not parse Retry-After header.")
+
+        # 2. Check primary rate limit reset time
+        try:
+            limits = self.gh.get_rate_limit()
+            if limit_type == "search":
+                limit_data = limits.search
+            elif limit_type == "core":
+                limit_data = limits.core # Issues search uses core limit
+            else:
+                print(f"Unknown rate limit type '{limit_type}'. Checking search limit.")
+                limit_data = limits.search
+
+            reset_time_utc = limit_data.reset.replace(tzinfo=timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            calculated_wait = (reset_time_utc - now_utc).total_seconds() + 5 # Add buffer
+
+            if calculated_wait > 0:
+                wait_seconds = calculated_wait
+                print(f"Waiting {wait_seconds:.0f} seconds until primary '{limit_type}' rate limit reset ({limit_data.remaining}/{limit_data.limit}).")
+                time.sleep(wait_seconds)
+                return
+            else:
+                print(f"Primary '{limit_type}' rate limit should be reset. Proceeding cautiously.")
+                # Even if reset, add a small delay for safety, especially if Retry-After wasn't present
+                time.sleep(5)
+                return
+
+        except Exception as e:
+            print(f"Error getting rate limit details: {e}. Falling back to 60s wait.")
+            time.sleep(wait_seconds) # Use the fallback wait
+
+    def _execute_with_retry(self, func, *args, **kwargs):
+        """Executes a function with exponential backoff for specific GitHub errors."""
+        max_retries = 5
+        base_delay = 2 # seconds
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except RateLimitExceededException as rle:
+                limit_type = "search" if "search" in str(func) else "core"
+                print(f"\nRate limit hit (attempt {attempt + 1}/{max_retries}). Waiting...")
+                self._wait_for_rate_limit_reset(limit_type, exception=rle)
+                # Continue to next attempt after waiting
+            except GithubException as ge: # Catch other potentially transient errors like 5xx
+                 # Check if it's a server error (5xx) which might be transient
+                 if hasattr(ge, 'status') and ge.status >= 500:
+                     delay = (base_delay ** attempt) + random.uniform(0, 1) # Exponential backoff with jitter
+                     print(f"\nGitHub API server error (Status {ge.status}, attempt {attempt + 1}/{max_retries}): {ge.data.get('message', 'No message')}. Retrying in {delay:.2f}s...")
+                     time.sleep(delay)
+                 else:
+                     # Non-retryable GitHub error (e.g., 404, 403)
+                     print(f"\nNon-retryable GitHub error encountered: {ge}")
+                     raise # Re-raise the original exception
+            except Exception as e:
+                # Catch-all for other unexpected errors during the API call
+                print(f"\nUnexpected error during API call (attempt {attempt + 1}/{max_retries}): {e}")
+                # Depending on the error, you might want to retry or raise immediately
+                # For now, let's retry for unexpected errors too, but log clearly
+                if attempt < max_retries - 1:
+                    delay = (base_delay ** attempt) + random.uniform(0, 1)
+                    print(f"Retrying in {delay:.2f}s...")
+                    time.sleep(delay)
+                else:
+                    print("Max retries reached for unexpected error.")
+                    raise # Re-raise after max retries
+
+        print(f"\nMax retries ({max_retries}) exceeded for function {func.__name__}. Aborting operation.")
+        # Raise a specific error or return None/empty to indicate failure
+        raise RuntimeError(f"Failed to execute {func.__name__} after {max_retries} retries due to persistent API errors.")
+
+
     def search(
         self,
         *,
-        label: str,
+        label: str, # Label is now used for filtering, not initial search
         language: str = "python",
         min_stars: int = 20,
         recent_days: int = 365,
-        max_results: int = 50,
-    ) -> List[Repository]:
-        query = self._build_query(
-            label=label, language=language, min_stars=min_stars, recent_days=recent_days
+        max_results: int = 50, # Target number of *qualified* repos
+        cache_file: Path, # Pass cache file path for incremental writing
+    ) -> Iterator[Repository]:
+        """
+        Searches repositories, filters by open issue label, yields qualified repos,
+        and saves them incrementally to the cache file (JSONL format).
+        Handles rate limits with backoff and retry.
+        """
+        repo_query = self._build_repo_query(
+            language=language, min_stars=min_stars, recent_days=recent_days
         )
-        print(f"Searching GitHub with query: {query}")  # Log the query
-        results: List[Repository] = []
+        print(f"Searching GitHub repositories with query: {repo_query}")
+        print(f"Filtering for repos with open issues labeled: '{label}'")
+        print(f"Saving results incrementally to: {cache_file}")
+
+        found_count = 0
+        processed_repo_count = 0
+
+        # Ensure cache directory exists
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+
         try:
-            paginated_list = self.gh.search_repositories(
-                query=query, sort="updated", order="desc"
-            )
-            # Respect max_results and handle potential pagination issues
-            total_to_fetch = (
-                min(max_results, paginated_list.totalCount)
-                if max_results is not None
-                else paginated_list.totalCount
-            )
-            print(
-                f"Found {paginated_list.totalCount} potential repos, fetching up to {total_to_fetch}..."
+            # Initial search for repositories - wrap in retry logic
+            paginated_list = self._execute_with_retry(
+                self.gh.search_repositories,
+                query=repo_query, sort="updated", order="desc"
             )
 
-            # Ensure total_to_fetch is not None before passing to tqdm
-            if total_to_fetch is None:
-                print(
-                    "Warning: Could not determine total count from GitHub. Progress bar might be inaccurate."
-                )
-                pbar_total = None # tqdm handles None total
-            else:
-                pbar_total = total_to_fetch
+            if not paginated_list: # Handle case where initial search fails after retries
+                 print("[red]Initial repository search failed after multiple retries.")
+                 return # Yield nothing
 
-            # --- Modified Iteration Logic ---
-            # Iterate manually to control rate limiting and max_results precisely within the loop
+            print(f"Found {paginated_list.totalCount} potential repos matching base criteria.")
+            print(f"Checking them for open '{label}' issues until {max_results} are found...")
+
             repo_iterator = iter(paginated_list)
-            processed_count = 0
-            # Use tqdm primarily for the progress bar display, but iterate manually
-            with tqdm(total=pbar_total, desc="Searching repos") as pbar:
-                print(f"!!! DEBUG: pbar object in SUT: {pbar} !!!") # ADDED DEBUG
-                while total_to_fetch is None or processed_count < total_to_fetch:
-                    try:
-                        # Check max_results before fetching next item
-                        if max_results is not None and len(results) >= max_results:
-                             print(
-                                 f"Reached max_results ({max_results}). Stopping search."
-                             )
-                             break
 
-                        print("!!! DEBUG: Calling next(repo_iterator) !!!") # ADDED DEBUG
-                        repo = next(repo_iterator)
-                        print(f"!!! DEBUG: Successfully got repo: {repo} !!!") # ADDED DEBUG
-                        # We increment processed_count here because next() succeeded
-                        processed_count += 1
-                        results.append(repo)
-                        print("!!! DEBUG: Calling pbar.update(1) after success !!!") # ADDED DEBUG
-                        pbar.update(1) # Manually update pbar for the successfully processed item
+            # Open cache file for appending JSON Lines
+            with cache_file.open("a", encoding="utf-8") as f_cache, \
+                 tqdm(total=max_results, desc=f"Finding repos w/ '{label}' issues") as pbar:
+
+                while found_count < max_results:
+                    try:
+                        # Get next repo from iterator with retry for iterator errors
+                        repo = self._execute_with_retry(next, repo_iterator)
+                        processed_repo_count += 1
+
+                        # Check if this repo has the required open issue label (also with retry)
+                        has_label = self._execute_with_retry(
+                            self._has_open_issue_with_label, repo, label
+                        )
+
+                        if has_label:
+                            found_count += 1
+                            pbar.update(1)
+                            # Print details immediately
+                            print(f"\n  [+] Qualified: {repo.full_name}")
+                            print(f"      URL: {repo.html_url}")
+                            print(f"      ({found_count}/{max_results})")
+
+                            # Write raw data to cache file immediately
+                            json.dump(repo.raw_data, f_cache)
+                            f_cache.write("\n") # Newline for JSONL format
+                            f_cache.flush() # Ensure it's written to disk
+
+                            yield repo # Yield the qualified repo object
 
                     except StopIteration:
-                        print("Reached end of GitHub search results.")
+                        print("\nReached end of GitHub repository search results.")
                         break # Exit the while loop cleanly
-                    except github.RateLimitExceededException:
-                        print("!!! DEBUG: Entering RateLimitExceededException block !!!") # ADDED DEBUG PRINT
-                        print("Rate limit exceeded during iteration. Waiting...")
-                        # Make sure self.gh is accessible here
-                        print(f"!!! DEBUG: Calling self.gh.get_rate_limit() on {self.gh} !!!") # ADDED DEBUG
-                        limit = self.gh.get_rate_limit().search
-                        print(f"!!! DEBUG: Got limit: {limit} !!!") # ADDED DEBUG
-                        reset_time = limit.reset.replace(tzinfo=timezone.utc)
-                        wait_seconds = (
-                            reset_time - datetime.now(timezone.utc)
-                        ).total_seconds() + 5  # Add buffer
-                        print(
-                            f"Waiting for {wait_seconds:.0f} seconds until rate limit reset."
-                        )
-                        if wait_seconds > 0:
-                            time.sleep(wait_seconds)
-                        # After waiting, continue the loop to retry fetching the *next* item
-                        # The current item that caused the rate limit is skipped implicitly
-                        # We don't increment processed_count or update pbar here,
-                        # as the item wasn't successfully processed. The loop continues.
-                        continue
-                    except github.GithubException as ge:
-                        print("!!! DEBUG: Entering GithubException block !!!") # ADDED DEBUG PRINT
-                        # Handle specific GitHub errors more gracefully
-                        print(
-                            f"GitHub API error fetching repo details: {ge}. Status: {ge.status}. Skipping this repo."
-                        )
-                        if ge.status == 422:
-                            print("Query might be too complex or invalid.")
-                        # Increment processed_count because we attempted to process an item from the iterator
-                        processed_count += 1
-                        # Update pbar to reflect that an item was processed (even if skipped)
-                        print("!!! DEBUG: Calling pbar.update(1) after GithubException !!!") # ADDED DEBUG
-                        pbar.update(1)
-                        # Continue to the next potential repo
-                        continue
+                    except (RuntimeError, GithubException, UnknownObjectException) as e:
+                         # Catch errors from retry logic or specific GitHub issues
+                         print(f"\n[yellow]Warning: Skipping repo due to error: {e}")
+                         # Decide if the error is fatal for the whole search
+                         if isinstance(e, GithubException) and e.status == 422:
+                             print("[red]Stopping search due to persistent invalid query or data error (422).")
+                             break
+                         continue # Continue to the next repo if possible
                     except Exception as e:
-                        print(f"Unexpected error fetching repo details: {e}. Skipping.")
-                        # Increment processed_count because we attempted to process an item
-                        processed_count += 1
-                        # Update pbar
-                        print("!!! DEBUG: Calling pbar.update(1) after generic Exception !!!") # ADDED DEBUG
-                        pbar.update(1)
-                        # Continue to next repo
+                        # Catch unexpected errors during the loop processing
+                        print(f"\n[red]Unexpected error processing repo stream: {e}. Skipping.")
+                        # Consider adding a delay or stopping based on error type
                         continue
-            # --- End Modified Iteration Logic ---
 
-        except github.GithubException as e:
-            # This catches errors during the initial search_repositories call
-            print(f"GitHub API error during initial search setup: {e}")
-            if e.status == 401:
-                raise RuntimeError("Bad GitHub credentials. Check GITHUB_TOKEN.") from e
-            # Re-raise other GitHub errors during setup
-            raise
+            if found_count < max_results:
+                 print(f"\nWarning: Found only {found_count} repositories meeting all criteria after checking {processed_repo_count} candidates.")
+            else:
+                 print(f"\nSuccessfully found and cached {found_count} repositories meeting all criteria.")
+
+        except RuntimeError as e:
+             # Catch failure from initial search retry wrapper
+             print(f"[red]Error during initial search setup: {e}")
+             # No need to return/yield anything, function ends
+        except GithubException as e:
+             # Catch non-retryable errors during initial search setup
+             print(f"[red]GitHub API error during initial search setup: {e}")
+             if e.status == 401:
+                 raise RuntimeError("Bad GitHub credentials. Check GITHUB_TOKEN.") from e
+             # Other non-retryable errors caught here
         except Exception as e:
-            # Catch any other unexpected errors during setup
-            print(f"An unexpected error occurred during search setup: {e}")
-            raise
+             # Catch any other unexpected errors during setup
+             print(f"[red]An unexpected error occurred during search setup: {e}")
+             raise # Re-raise critical setup errors
 
-        print(f"Retrieved {len(results)} repositories.")
-        return results
 
-    def good_first_issue_repos(self, **kwargs) -> List[Repository]:
-        return self.search(label="good first issue", **kwargs)  # Use quoted label
+    # These helper methods are less useful now search yields results,
+    # but can be kept for potential internal use or adapted if needed.
+    # They would need modification to handle the yielding nature of search().
+    # def good_first_issue_repos(self, **kwargs) -> Iterator[Repository]:
+    #     yield from self.search(label="good first issue", **kwargs)
 
-    def help_wanted_repos(self, **kwargs) -> List[Repository]:
-        return self.search(label="help wanted", **kwargs)  # Use quoted label
+    # def help_wanted_repos(self, **kwargs) -> Iterator[Repository]:
+    #     yield from self.search(label="help wanted", **kwargs)
