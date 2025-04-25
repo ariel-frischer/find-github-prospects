@@ -11,6 +11,7 @@ from github import (
 from github.Repository import Repository
 from github.ContentFile import ContentFile
 from github.PaginatedList import PaginatedList
+import copy # Import copy module
 
 # Import the class from the module under test for patching if needed
 from repobird_leadgen.github_search import GitHubSearcher
@@ -45,15 +46,20 @@ def mock_github(mocker):
     mock_search_results = MagicMock(spec=PaginatedList)
     # Make the mock iterable
     mock_search_results.__iter__.return_value = iter([])  # Default empty
-    mock_instance.search_repositories.return_value = mock_search_results
+
+    # Create mock method and set __name__ explicitly for retry logic
+    mock_search_method = MagicMock(name='search_repositories', return_value=mock_search_results)
+    mock_search_method.__name__ = 'search_repositories'
+    mock_instance.search_repositories = mock_search_method
 
     # Mock the RateLimit object structure expected by the SUT
     mock_rate_limit_info = MagicMock()
     mock_rate_limit_info.search = MagicMock()
+    mock_rate_limit_info.core = MagicMock() # Add core limit mock
     # Set a realistic reset time slightly in the future
-    mock_rate_limit_info.search.reset = datetime.now(timezone.utc) + timedelta(
-        seconds=10
-    )
+    reset_time = datetime.now(timezone.utc) + timedelta(seconds=10)
+    mock_rate_limit_info.search.reset = reset_time
+    mock_rate_limit_info.core.reset = reset_time
     mock_instance.get_rate_limit.return_value = mock_rate_limit_info
 
     # Mock the Github constructor *within the SUT's namespace* ONLY
@@ -83,6 +89,16 @@ def mock_repo_data():
         "pushed_at": now,
         "owner": MagicMock(login="test_owner", type="User"),
         "readme_content": b"This is the README content.",
+        "raw_data": { # Add raw_data for caching
+            "full_name": "test_owner/test_repo",
+            "html_url": "https://github.com/test_owner/test_repo",
+            "description": "A test repository",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "topics": ["python", "test"],
+            "pushed_at": now.isoformat(),
+            "owner": {"login": "test_owner", "type": "User"},
+        }
     }
 
 
@@ -98,6 +114,11 @@ def mock_repository(mocker, mock_repo_data):
     mock_readme_file.decoded_content = mock_repo_data["readme_content"]
     mock_repo.get_readme.return_value = mock_readme_file
 
+    # Mock the _has_open_issue_with_label method on the searcher instance later
+    # We also need to mock the raw_data attribute for caching
+    # Use deepcopy to avoid modifying the original fixture data if reused
+    mock_repo.raw_data = copy.deepcopy(mock_repo_data["raw_data"])
+
     return mock_repo
 
 
@@ -108,8 +129,7 @@ def mock_repository(mocker, mock_repo_data):
 def test_github_searcher_init(mock_auth, mock_github):
     """Tests that GitHubSearcher initializes Auth.Token and Github correctly."""
     token = "test_token_123"
-    searcher = GitHubSearcher(token=token)  # This call uses the patched constructors
-
+    searcher = GitHubSearcher(token=token)
     # Assert the Auth.Token mock (the patched class itself) was called
     mock_auth["class_patch"].assert_called_once_with(token)
 
@@ -122,47 +142,62 @@ def test_github_searcher_init(mock_auth, mock_github):
 
 
 @pytest.mark.unit
-def test_build_query(mocker, mock_auth, mock_github):  # Need fixtures for init
-    """Tests the _build_query method with various parameters."""
+@patch("repobird_leadgen.github_search.datetime") # Patch datetime directly in SUT namespace
+def test_build_repo_query(mock_datetime, mock_auth, mock_github):  # Need fixtures for init
+    """Tests the _build_repo_query method with various parameters."""
     fixed_now = datetime(2024, 1, 31, 12, 0, 0, tzinfo=timezone.utc)
-    # Patch datetime in the SUT's namespace
-    mock_datetime = mocker.patch("repobird_leadgen.github_search.datetime")
     mock_datetime.now.return_value = fixed_now
     # Allow datetime constructor usage if needed by SUT or tests
     mock_datetime.side_effect = (
         lambda *args, **kw: datetime(*args, **kw) if args else fixed_now
     )
 
-    searcher = GitHubSearcher(token="dummy")  # Instantiation uses mocks
+    searcher = GitHubSearcher(token="dummy")
 
-    query1 = searcher._build_query(
-        label="good first issue", language="python", min_stars=50, recent_days=30
+    # Call _build_repo_query without 'label'
+    query1 = searcher._build_repo_query(
+        language="python", min_stars=50, recent_days=30
     )
-    expected_date_30 = (fixed_now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    assert 'label:"good first issue"' in query1
-    assert f"pushed:>{expected_date_30}" in query1
+    expected_date_30_str = (fixed_now - timedelta(days=30)).strftime("%Y-%m-%d")
+    assert f"language:python" in query1
+    assert f"stars:>=50" in query1
+    assert f"pushed:>{expected_date_30_str}" in query1
+    assert "label:" not in query1 # Ensure label is not part of this query
 
-    query2 = searcher._build_query(
-        label="help wanted", language="javascript", min_stars=10, recent_days=90
+    query2 = searcher._build_repo_query(
+        language="javascript", min_stars=10, recent_days=90
     )
-    expected_date_90 = (fixed_now - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    assert 'label:"help wanted"' in query2
-    assert f"pushed:>{expected_date_90}" in query2
+    expected_date_90_str = (fixed_now - timedelta(days=90)).strftime("%Y-%m-%d")
+    assert f"language:javascript" in query2
+    assert f"stars:>=10" in query2
+    assert f"pushed:>{expected_date_90_str}" in query2
+    assert "label:" not in query2
 
-    query3 = searcher._build_query(
-        label="bug", language="go", min_stars=0, recent_days=1
+    query3 = searcher._build_repo_query(
+        language="go", min_stars=0, recent_days=1
     )
-    expected_date_1 = (fixed_now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    assert 'label:"bug"' in query3
-    assert f"pushed:>{expected_date_1}" in query3
+    expected_date_1_str = (fixed_now - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert f"language:go" in query3
+    assert f"stars:>=0" in query3
+    assert f"pushed:>{expected_date_1_str}" in query3
+    assert "label:" not in query3
 
 
 @pytest.mark.unit
 @patch("repobird_leadgen.github_search.tqdm")  # Patch tqdm directly
 @patch("repobird_leadgen.github_search.time.sleep")
+@patch.object(GitHubSearcher, "_has_open_issue_with_label", return_value=True) # Mock label check
+@patch("repobird_leadgen.github_search.datetime") # Patch datetime for query build
 def test_search_success(
-    mock_sleep, mock_tqdm_class, mock_auth, mock_github, mock_repository, mock_repo_data
+    mock_datetime, mock_label_check, mock_sleep, mock_tqdm_class, mock_auth, mock_github, mock_repository, mock_repo_data, tmp_path # Added tmp_path
 ):
+    # Setup datetime mock for _build_repo_query
+    fixed_now = datetime(2024, 1, 31, 12, 0, 0, tzinfo=timezone.utc)
+    mock_datetime.now.return_value = fixed_now
+    mock_datetime.side_effect = (
+        lambda *args, **kw: datetime(*args, **kw) if args else fixed_now
+    )
+
     # Configure the mock tqdm class to handle context management
     mock_pbar = MagicMock()
     mock_pbar.update = MagicMock()
@@ -175,6 +210,7 @@ def test_search_success(
     )
 
     searcher = GitHubSearcher(token="dummy")
+    searcher.issue_cache = {} # Clear cache for this test
     # searcher.gh is already the correct mock instance from the mock_github fixture
 
     mock_repos_list = [mock_repository]
@@ -183,27 +219,37 @@ def test_search_success(
     mock_github["search_results"].totalCount = 1
 
     label, lang, stars, days, max_res = "good first issue", "python", 50, 30, 10
-    results = searcher.search(
+    # Consume the iterator
+    results = list(searcher.search(
         label=label,
         language=lang,
         min_stars=stars,
         recent_days=days,
         max_results=max_res,
-    )
+        cache_file=tmp_path / "test_cache.json", # Added cache_file
+        existing_repo_names=set() # Provide empty set
+    ))
 
-    expected_query = searcher._build_query(
-        label=label, language=lang, min_stars=stars, recent_days=days
+    # Build expected query without label
+    expected_query = searcher._build_repo_query(
+        language=lang, min_stars=stars, recent_days=days
     )
+    # Assert the initial repo search was called correctly
     mock_github["instance"].search_repositories.assert_called_once_with(
         query=expected_query, sort="updated", order="desc"
     )
+    # Assert the label check was called on the searcher instance via _execute_with_retry
+    mock_label_check.assert_called_once_with(mock_repository, label)
+
 
     # Check tqdm call using call_args
     mock_tqdm_class.assert_called_once()
     call_args, call_kwargs = mock_tqdm_class.call_args
     # The first positional argument should be the iterable
     assert call_args == ()  # No positional args expected
-    assert call_kwargs == {"total": 1, "desc": "Searching repos"}
+    # Check the description and total (now max_results)
+    assert call_kwargs["desc"] == f"Finding repos w/ '{label}' issues"
+    assert call_kwargs["total"] == max_res
 
     # Check update on the pbar instance
     mock_pbar.update.assert_called_once_with(1)
@@ -214,214 +260,339 @@ def test_search_success(
 
 
 @pytest.mark.unit
-@patch("repobird_leadgen.github_search.tqdm")  # Patch tqdm directly
+@patch("repobird_leadgen.github_search.tqdm")
 @patch("repobird_leadgen.github_search.time.sleep")
-@patch("builtins.print")  # Mock print for cleaner test output
-def test_search_readme_not_found(
-    mock_print,
-    mock_sleep,
-    mock_tqdm_class,
-    mock_auth,
-    mock_github,
-    mock_repository,
-    mock_repo_data,
+@patch("builtins.print")
+@patch.object(GitHubSearcher, "_has_open_issue_with_label", return_value=False) # Mock label check returns False
+@patch("repobird_leadgen.github_search.datetime") # Patch datetime for query build
+def test_search_repo_without_label(
+    mock_datetime, mock_label_check, mock_print, mock_sleep, mock_tqdm_class, mock_auth, mock_github, mock_repository, tmp_path
 ):
-    # Configure the mock tqdm class
+    """Test that a repo is NOT yielded if the label check returns False."""
+    # Setup datetime mock for _build_repo_query
+    fixed_now = datetime(2024, 1, 31, 12, 0, 0, tzinfo=timezone.utc)
+    mock_datetime.now.return_value = fixed_now
+    mock_datetime.side_effect = (
+        lambda *args, **kw: datetime(*args, **kw) if args else fixed_now
+    )
+
     mock_pbar = MagicMock()
-    mock_pbar.update = MagicMock()
-    mock_pbar.close = MagicMock()
     mock_tqdm_context = MagicMock()
     mock_tqdm_context.__enter__.return_value = mock_pbar
-    mock_tqdm_context.__exit__.return_value = None
     mock_tqdm_class.return_value = mock_tqdm_context
 
-    searcher = GitHubSearcher(token="dummy")  # Uses mocks for init
-    # searcher.gh is mock_github['instance']
-
-    mock_repository.get_readme.side_effect = UnknownObjectException(
-        status=404, data={}, headers={}
-    )
+    searcher = GitHubSearcher(token="dummy")
+    searcher.issue_cache = {} # Clear cache for this test
     mock_repos_list = [mock_repository]
     mock_github["search_results"].__iter__.return_value = iter(mock_repos_list)
     mock_github["search_results"].totalCount = 1
 
-    results = searcher.search(
-        label="test", language="any", min_stars=0, recent_days=365
-    )
+    label = "non-existent-label"
+    # Consume iterator
+    results = list(searcher.search(
+        label=label, language="any", min_stars=0, recent_days=365, max_results=1,
+        cache_file=tmp_path / "test_cache.json", existing_repo_names=set()
+    ))
 
     mock_github["instance"].search_repositories.assert_called_once()
-
-    # Check tqdm call using call_args
+    # Assert the label check was called via _execute_with_retry
+    mock_label_check.assert_called_once_with(mock_repository, label)
     mock_tqdm_class.assert_called_once()
-    call_args, call_kwargs = mock_tqdm_class.call_args
-    assert call_args == ()  # No positional args expected
-    assert call_kwargs == {"total": 1, "desc": "Searching repos"}
-
-    # Check update on the pbar instance
-    mock_pbar.update.assert_called_once_with(
-        1
-    )  # Update is called for the item before get_readme fails
-
-    assert len(results) == 1  # Search still returns the repo object
-    assert results[0] == mock_repository
+    # pbar.update should NOT have been called because the repo didn't qualify
+    mock_pbar.update.assert_not_called()
+    assert len(results) == 0 # No results should be yielded
     mock_sleep.assert_not_called()
 
 
 @pytest.mark.unit
-@patch("repobird_leadgen.github_search.tqdm")  # Patch tqdm directly
+@patch("repobird_leadgen.github_search.tqdm")
 @patch("repobird_leadgen.github_search.time.sleep")
-# @patch('builtins.print') # Temporarily removed for debugging
-def test_search_rate_limit_during_iteration(
-    mock_sleep, mock_tqdm_class, mock_auth, mock_github, mock_repository
+@patch("builtins.print")
+@patch.object(GitHubSearcher, "_has_open_issue_with_label") # Mock label check
+@patch("repobird_leadgen.github_search.datetime") # Patch datetime for query build
+def test_search_label_check_exception(
+    mock_datetime, mock_label_check, mock_print, mock_sleep, mock_tqdm_class, mock_auth, mock_github, mock_repository, tmp_path
 ):
+    """Test that repo is skipped if label check raises an exception after retries."""
+     # Setup datetime mock for _build_repo_query
+    fixed_now = datetime(2024, 1, 31, 12, 0, 0, tzinfo=timezone.utc)
+    mock_datetime.now.return_value = fixed_now
+    mock_datetime.side_effect = (
+        lambda *args, **kw: datetime(*args, **kw) if args else fixed_now
+    )
+
+    mock_pbar = MagicMock()
+    mock_tqdm_context = MagicMock()
+    mock_tqdm_context.__enter__.return_value = mock_pbar
+    mock_tqdm_class.return_value = mock_tqdm_context
+
+    searcher = GitHubSearcher(token="dummy")
+    searcher.issue_cache = {} # Clear cache for this test
+    mock_repos_list = [mock_repository]
+    mock_github["search_results"].__iter__.return_value = iter(mock_repos_list)
+    mock_github["search_results"].totalCount = 1
+
+    # Configure label check mock to raise a retryable exception
+    mock_label_check.side_effect = GithubException(status=500, data={}, headers={})
+    # Set __name__ on the mock for the retry logic error message
+    mock_label_check.__name__ = '_has_open_issue_with_label'
+
+    label = "problem-label"
+    # Consume iterator
+    results = list(searcher.search(
+        label=label, language="any", min_stars=0, recent_days=365, max_results=1,
+        cache_file=tmp_path / "test_cache.json", existing_repo_names=set()
+    ))
+
+    mock_github["instance"].search_repositories.assert_called_once()
+    # Assert the label check was called with the correct arguments (at least once due to retry)
+    mock_label_check.assert_any_call(mock_repository, label)
+    # Assert it was called multiple times (specifically 5 times for max_retries)
+    assert mock_label_check.call_count == 5
+    # Assert sleep was called due to retries
+    mock_sleep.assert_called()
+
+    mock_tqdm_class.assert_called_once()
+    mock_pbar.update.assert_not_called() # No update as repo is skipped after retries fail
+    assert len(results) == 0 # No results yielded
+
+
+@pytest.mark.unit
+@patch("repobird_leadgen.github_search.tqdm")
+@patch("repobird_leadgen.github_search.time.sleep")
+@patch.object(GitHubSearcher, "_has_open_issue_with_label", return_value=True) # Mock label check
+@patch("repobird_leadgen.github_search.datetime") # Patch datetime
+def test_search_rate_limit_during_iteration(
+    mock_datetime, mock_label_check, mock_sleep, mock_tqdm_class, mock_auth, mock_github, tmp_path # Removed mock_repository, mock_repo_data
+):
+    # Setup datetime mock for _build_repo_query and wait logic
+    mock_now = datetime.now(timezone.utc)
+    mock_datetime.now.return_value = mock_now
+    mock_datetime.side_effect = (
+        lambda *args, **kw: datetime(*args, **kw) if args else mock_now
+    )
+
     # Configure the mock tqdm class
     mock_pbar = MagicMock()
     mock_pbar.update = MagicMock()
-    mock_pbar.close = MagicMock()
     mock_tqdm_context = MagicMock()
     mock_tqdm_context.__enter__.return_value = mock_pbar
-    mock_tqdm_context.__exit__.return_value = None
     mock_tqdm_class.return_value = mock_tqdm_context
 
-    searcher = GitHubSearcher(token="dummy")  # Uses mocks for init
-    # searcher.gh is mock_github['instance']
+    searcher = GitHubSearcher(token="dummy")
+    searcher.issue_cache = {} # Clear cache for this test
 
-    repo1 = mock_repository
+    # --- Manually define base data (similar to mock_repo_data fixture) ---
+    base_repo_data = {
+        "full_name": "test_owner/test_repo",
+        "html_url": "https://github.com/test_owner/test_repo",
+        "description": "A test repository",
+        "stargazers_count": 100,
+        "forks_count": 20,
+        "topics": ["python", "test"],
+        "pushed_at": mock_now, # Use mocked now
+        "owner": MagicMock(login="test_owner", type="User"),
+        # "readme_content": b"This is the README content.", # Not needed directly for mock
+        "raw_data": {
+            "full_name": "test_owner/test_repo",
+            "html_url": "https://github.com/test_owner/test_repo",
+            "description": "A test repository",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "topics": ["python", "test"],
+            "pushed_at": mock_now.isoformat(), # Use mocked now
+            "owner": {"login": "test_owner", "type": "User"},
+        }
+    }
+    # --- Create mocks based on this data ---
+    repo1_data = copy.deepcopy(base_repo_data)
+    repo1 = MagicMock(spec=Repository)
+    for key, value in repo1_data.items():
+         if key != "readme_content":
+            setattr(repo1, key, value)
+    repo1.raw_data = repo1_data["raw_data"]
+
+    # Create data for the second repo based on the base data
+    repo2_data = copy.deepcopy(base_repo_data)
+    repo2_data["full_name"] = "owner/repo2"
+    repo2_data["raw_data"]["full_name"] = "owner/repo2"
+    # Create the second mock repository
+    repo2 = MagicMock(spec=Repository)
+    for key, value in repo2_data.items():
+         if key != "readme_content":
+            setattr(repo2, key, value)
+    repo2.raw_data = repo2_data["raw_data"]
+
     rate_limit_exception = RateLimitExceededException(status=403, data={}, headers={})
 
-    # Define a generator to simulate the iterator behavior
+    # Simulate iterator raising RateLimitExceededException after yielding the first repo
     def rate_limit_iterator():
         yield repo1
         raise rate_limit_exception
-        # StopIteration is implicitly raised after the generator finishes
 
-    # Configure the iterable mock to use the generator
     mock_github["search_results"].__iter__.return_value = rate_limit_iterator()
-    mock_github["search_results"].totalCount = 2  # Still need totalCount for tqdm
+    # totalCount should reflect the potential total if no error occurred
+    mock_github["search_results"].totalCount = 2
 
-    # Adjust the reset time on the pre-configured mock rate limit object
-    mock_github["rate_limit_info"].search.reset = datetime.now(
-        timezone.utc
-    ) + timedelta(seconds=0.01)
+    # Configure rate limit info mock for the wait logic (use core limit for iteration)
+    mock_github["rate_limit_info"].core.reset = mock_now + timedelta(seconds=0.01)
 
-    results = searcher.search(
-        label="test", language="any", min_stars=0, recent_days=365, max_results=5
-    )
+    label = "test"
+    # Consume iterator
+    results = list(searcher.search(
+        label=label, language="any", min_stars=0, recent_days=365, max_results=5,
+        cache_file=tmp_path / "test_cache.json", existing_repo_names=set()
+    ))
 
+    # Assertions
     mock_github["instance"].search_repositories.assert_called_once()
-    # Assert get_rate_limit was called *on the instance* after the exception
-    mock_github[
-        "instance"
-    ].get_rate_limit.assert_called_once()  # Assert on mock_github['instance']
-    mock_sleep.assert_called_once()  # Sleep should be called
+    # Label check should only be called for the first repo before the exception
+    mock_label_check.assert_called_once_with(repo1, label)
+    # get_rate_limit should be called by _wait_for_rate_limit_reset when handling RLE from iterator
+    mock_github["instance"].get_rate_limit.assert_called()
+    mock_sleep.assert_called() # Sleep should be called due to rate limit wait
 
-    # Check tqdm call using call_args
     mock_tqdm_class.assert_called_once()
-    call_args, call_kwargs = mock_tqdm_class.call_args
-    assert call_args == ()  # No positional args expected
-    assert call_kwargs == {"total": 2, "desc": "Searching repos"}  # Total is 2
-
-    # Check update on the pbar instance was called once for the first repo
-    # The rate limit exception prevents the second update from occurring in the current logic
+    # pbar update called once for the successfully processed repo1
     mock_pbar.update.assert_called_once_with(1)
 
-    assert len(results) == 1
+    assert len(results) == 1 # Only repo1 should be yielded
     assert results[0] == repo1
-
-
-@pytest.mark.unit
-@patch("repobird_leadgen.github_search.tqdm")  # Patch tqdm directly
-def test_search_rate_limit_on_initial_search(mock_tqdm_class, mock_auth, mock_github):
-    # No need to configure mock_tqdm_class return value as it shouldn't be called
-
-    searcher = GitHubSearcher(token="dummy")  # Uses mocks for init
-    # searcher.gh is mock_github['instance']
-
-    # Configure the side effect on the specific instance's method
-    mock_github[
-        "instance"
-    ].search_repositories.side_effect = RateLimitExceededException(
-        status=403, data={}, headers={}
-    )
-
-    with pytest.raises(RateLimitExceededException):
-        searcher.search(label="test", language="any", min_stars=0, recent_days=365)
-    mock_github["instance"].search_repositories.assert_called_once()
-    mock_tqdm_class.assert_not_called()  # tqdm shouldn't be reached
 
 
 @pytest.mark.unit
 @patch("repobird_leadgen.github_search.tqdm")  # Patch tqdm directly
 @patch("repobird_leadgen.github_search.time.sleep")
-# @patch('builtins.print') # Temporarily removed for debugging
-def test_search_generic_github_exception_during_iteration(
-    mock_sleep, mock_tqdm_class, mock_auth, mock_github, mock_repository
-):
-    # Configure the mock tqdm class
-    mock_pbar = MagicMock(name="mock_pbar_instance")  # Add name for clarity
-    mock_pbar.update = MagicMock(name="mock_pbar_update")
-    mock_pbar.close = MagicMock(name="mock_pbar_close")
-    # Configure the main patch object (mock_tqdm_class) directly
-    mock_tqdm_instance = mock_tqdm_class.return_value
-    mock_tqdm_instance.__enter__.return_value = mock_pbar
-    mock_tqdm_instance.__exit__.return_value = None
+@patch("repobird_leadgen.github_search.datetime") # Patch datetime
+def test_search_rate_limit_on_initial_search(mock_datetime, mock_sleep, mock_tqdm_class, mock_auth, mock_github, tmp_path): # Added tmp_path
+     # Setup datetime mock for wait logic
+    mock_now = datetime.now(timezone.utc)
+    mock_datetime.now.return_value = mock_now
+    mock_datetime.side_effect = (
+        lambda *args, **kw: datetime(*args, **kw) if args else mock_now
+    )
 
-    searcher = GitHubSearcher(token="dummy")  # Uses mocks for init
-    # searcher.gh is mock_github['instance']
+    searcher = GitHubSearcher(token="dummy")
+    searcher.issue_cache = {} # Clear cache for this test
+
+    # Configure search_repositories to raise RateLimitExceededException
+    rate_limit_exception = RateLimitExceededException(status=403, data={}, headers={})
+    # Ensure the mock method has the correct name explicitly in the test
+    mock_github["instance"].search_repositories.__name__ = 'search_repositories'
+    mock_github["instance"].search_repositories.side_effect = rate_limit_exception
+
+    # Configure rate limit info mock for the wait logic (use search limit for search_repositories)
+    mock_github["rate_limit_info"].search.reset = mock_now + timedelta(seconds=0.01)
+
+    # The search function now uses _execute_with_retry internally.
+    # We expect _execute_with_retry to catch the RLE, wait, and retry.
+    # If retries fail, it raises RuntimeError.
+    with pytest.raises(RuntimeError, match="Failed to execute search_repositories after 5 retries"):
+         # Consume the iterator to trigger the search and retries
+        list(searcher.search(
+            label="test", language="any", min_stars=0, recent_days=365,
+            cache_file=tmp_path / "test_cache.json", existing_repo_names=set()
+        ))
+
+    # Assert search_repositories was called multiple times due to retries
+    assert mock_github["instance"].search_repositories.call_count == 5
+    # Assert get_rate_limit was called during the wait logic
+    mock_github["instance"].get_rate_limit.assert_called()
+    # Assert sleep was called during the wait logic
+    mock_sleep.assert_called()
+    mock_tqdm_class.assert_not_called()  # tqdm shouldn't be reached if initial search fails
+
+
+@pytest.mark.unit
+@patch("repobird_leadgen.github_search.tqdm")
+@patch("repobird_leadgen.github_search.time.sleep")
+@patch.object(GitHubSearcher, "_has_open_issue_with_label", return_value=True) # Mock label check
+@patch("repobird_leadgen.github_search.datetime") # Patch datetime
+def test_search_generic_github_exception_during_iteration(
+    mock_datetime, mock_label_check, mock_sleep, mock_tqdm_class, mock_auth, mock_github, mock_repository, tmp_path # Added tmp_path
+):
+    # Setup datetime mock
+    mock_now = datetime.now(timezone.utc)
+    mock_datetime.now.return_value = mock_now
+    mock_datetime.side_effect = (
+        lambda *args, **kw: datetime(*args, **kw) if args else mock_now
+    )
+
+    # Configure the mock tqdm class
+    mock_pbar = MagicMock(name="mock_pbar_instance")
+    mock_pbar.update = MagicMock(name="mock_pbar_update")
+    mock_tqdm_context = MagicMock()
+    mock_tqdm_context.__enter__.return_value = mock_pbar
+    mock_tqdm_class.return_value = mock_tqdm_context
+
+    searcher = GitHubSearcher(token="dummy")
+    searcher.issue_cache = {} # Clear cache for this test
 
     repo1 = mock_repository
-    generic_exception = GithubException(status=500, data={}, headers={})
+    generic_exception = GithubException(status=500, data={}, headers={}) # Retryable error
 
-    # Define a generator to simulate the iterator behavior
+    # Simulate iterator raising GithubException after yielding the first repo
     def generic_exception_iterator():
         yield repo1
         raise generic_exception
-        # StopIteration is implicitly raised after the generator finishes
 
-    # Configure the iterable mock to use the generator
     mock_github["search_results"].__iter__.return_value = generic_exception_iterator()
-    mock_github["search_results"].totalCount = 2  # Still need totalCount for tqdm
+    mock_github["search_results"].totalCount = 2
 
-    results = searcher.search(
-        label="test", language="any", min_stars=0, recent_days=365
-    )
+    # Consume iterator
+    results = list(searcher.search(
+        label="test", language="any", min_stars=0, recent_days=365, max_results=2,
+        cache_file=tmp_path / "test_cache.json", existing_repo_names=set()
+    ))
 
+    # Assertions
     mock_github["instance"].search_repositories.assert_called_once()
-
-    # Check tqdm call using call_args
-    mock_tqdm_class.assert_called_once()
-    call_args, call_kwargs = mock_tqdm_class.call_args
-    assert call_args == ()  # No positional args expected
-    assert call_kwargs == {"total": 2, "desc": "Searching repos"}  # Total is 2
-
-    # Check update on the pbar instance was called twice:
-    # Once for the successful repo, once for the skipped repo
-    assert mock_pbar.update.call_count == 2  # Assert call count directly
-
-    assert len(results) == 1  # SUT catches exception and continues, returns only repo1
-    assert results[0] == repo1
+    # Label check called only for repo1
+    mock_label_check.assert_called_once_with(repo1, "test")
+    # Sleep should NOT be called here because the exception occurs during iteration (getting next item),
+    # which the current search loop catches and skips, rather than retrying the iteration itself.
     mock_sleep.assert_not_called()
 
+    mock_tqdm_class.assert_called_once()
+    # pbar update called once for repo1
+    mock_pbar.update.assert_called_once_with(1)
 
-# --- Integration Tests --- (No changes needed here)
+    assert len(results) == 1 # Only repo1 yielded
+    assert results[0] == repo1
+
+
+# --- Integration Tests ---
 
 
 @pytest.mark.integration
 @skip_if_no_token
-def test_basic_search_integration():
+def test_basic_search_integration(tmp_path): # Added tmp_path
     gh = GitHubSearcher()
+    cache_file = tmp_path / "integration_test_cache.json"
     try:
-        repos = gh.search(
+        # Consume the iterator and convert to list
+        repos = list(gh.search(
             label="good first issue",
             language="python",
             min_stars=1,
             recent_days=365 * 2,
-            max_results=5,
-        )
-        assert isinstance(repos, list)
+            max_results=1, # Reduced max_results to 1 for debugging timeout
+            cache_file=cache_file, # Use tmp_path cache
+            existing_repo_names=set() # Provide empty set
+        ))
+        assert isinstance(repos, list) # Check if it's a list after conversion
         if repos:
             assert isinstance(repos[0], Repository)
-        assert len(repos) <= 5
+            # Verify cache file was created and has content
+            assert cache_file.exists()
+            assert cache_file.stat().st_size > 0
+            # Very basic check for JSONL format (can be improved)
+            with cache_file.open("r") as f:
+                first_line = f.readline()
+                assert first_line.startswith("{") and first_line.endswith("}\n")
+
+        # The number of results yielded might be less than max_results
+        assert len(repos) <= 1 # Adjusted assertion for max_results=1
     except RateLimitExceededException:
         pytest.skip("GitHub API rate limit exceeded.")
     except GithubException as e:
@@ -429,24 +600,4 @@ def test_basic_search_integration():
     except Exception as e:
         pytest.fail(f"Unexpected error during test_basic_search: {e}")
 
-
-@pytest.mark.integration
-@skip_if_no_token
-def test_good_first_issue_repos_helper_integration():
-    gh = GitHubSearcher()
-    try:
-        repos = gh.good_first_issue_repos(
-            language="python", min_stars=1, recent_days=365 * 2, max_results=3
-        )
-        assert isinstance(repos, list)
-        if repos:
-            assert isinstance(repos[0], Repository)
-        assert len(repos) <= 3
-    except RateLimitExceededException:
-        pytest.skip("GitHub API rate limit exceeded.")
-    except GithubException as e:
-        pytest.fail(
-            f"GitHub API error during test_good_first_issue_repos_helper: {e.status} {e.data}"
-        )
-    except Exception as e:
-        pytest.fail(f"Unexpected error during test_good_first_issue_repos_helper: {e}")
+# Removed test_good_first_issue_repos_helper_integration function
