@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Optional, Tuple, List  # Added Tuple, List
+from typing import Optional, Tuple, List, Dict, Any  # Added Dict, Any
 import urllib.parse
 
 from playwright.sync_api import (
@@ -29,7 +29,13 @@ class BrowserIssueChecker:
     # Selector for the 'no results' message container
     _NO_RESULTS_SELECTOR = "div.blankslate"
     # Regex to extract issue number from the href of the issue link
+    # Regex to extract issue number from the href of the issue link
+    # Regex to extract issue number from the href of the issue link
     _ISSUE_ID_RE = re.compile(r"/issues/(\d+)$")
+    # Selectors for individual issue page details
+    # Target the H1 using its data-component attribute
+    _ISSUE_TITLE_SELECTOR = 'h1[data-component="PH_Title"]'
+    _ISSUE_BODY_SELECTOR = 'div.markdown-body[data-testid="markdown-body"]'
 
     # Increase default timeout significantly for debugging
     def __init__(
@@ -87,6 +93,76 @@ class BrowserIssueChecker:
                 print(f"[yellow][BrowserChecker] Error stopping Playwright: {e}")
             self._playwright = None
 
+    def _fetch_issue_details(
+        self, page: Page, issue_url: str
+    ) -> Optional[Dict[str, str]]:
+        """Navigates to an issue URL and extracts title and description."""
+        print(f"    Fetching details for: {issue_url}")
+        try:
+            page.goto(issue_url, wait_until="domcontentloaded", timeout=self.timeout)
+            # Wait for container elements to be attached, give full timeout
+            # Use simpler container selectors for waiting
+            title_container_selector = 'div[data-component="TitleArea"]'
+            body_container_selector = "div.IssueBodyViewer-module__IssueBody--MXyFt"
+
+            # print(f"      Waiting for title container: '{title_container_selector}'...") # Commented out
+            page.wait_for_selector(
+                title_container_selector, state="attached", timeout=self.timeout
+            )
+            # print("      Title container found.") # Commented out
+
+            # print(f"      Waiting for body container: '{body_container_selector}'...") # Commented out
+            page.wait_for_selector(
+                body_container_selector, state="attached", timeout=self.timeout
+            )
+            # print("      Body container found.") # Commented out
+
+            # Explicitly wait for the title element to be VISIBLE
+            # Updated print statement to reflect the new selector target (H1 with data-component)
+            # print(f"      Waiting for title element H1 to be visible: '{self._ISSUE_TITLE_SELECTOR}'...") # Commented out
+            page.wait_for_selector(
+                self._ISSUE_TITLE_SELECTOR, state="visible", timeout=self.timeout
+            )
+            # print("      Title element H1 is visible.") # Commented out
+            title_element = page.locator(self._ISSUE_TITLE_SELECTOR).first
+
+            # Explicitly wait for the body element to be VISIBLE
+            # print(f"      Waiting for body element to be visible: '{self._ISSUE_BODY_SELECTOR}'...") # Commented out
+            page.wait_for_selector(
+                self._ISSUE_BODY_SELECTOR, state="visible", timeout=self.timeout
+            )
+            # print("      Body element is visible.") # Commented out
+            body_element = page.locator(self._ISSUE_BODY_SELECTOR).first
+            # print("      Body element located.") # Commented out
+
+            # Revert to text_content() with a shorter timeout for the extraction itself
+            # print("      Extracting title text using text_content()...") # Commented out
+            title = title_element.text_content(timeout=self.timeout / 2) or ""
+            # print("      Title text extracted.") # Commented out
+
+            # print("      Extracting body text using text_content()...") # Commented out
+            description = body_element.text_content(timeout=self.timeout / 2) or ""
+            # print("      Body text extracted.") # Commented out
+
+            # Basic cleanup
+            title = title.strip()
+            description = description.strip()
+
+            print(f"      Title: '{title[:50]}...'")
+            return {"title": title, "description": description}
+
+        except PlaywrightTimeoutError:
+            print(f"      [yellow]Timeout fetching details for {issue_url}")
+            return None
+        except PlaywrightError as pe:
+            print(
+                f"      [yellow]Playwright error fetching details for {issue_url}: {pe}"
+            )
+            return None
+        except Exception as e:
+            print(f"      [red]Unexpected error fetching details for {issue_url}: {e}")
+            return None
+
     def _get_new_page(self) -> Page:
         """Creates a new browser page."""
         if not self._browser:
@@ -102,26 +178,28 @@ class BrowserIssueChecker:
 
     def check_repo_for_issue_label(
         self, repo_full_name: str, label: str
-    ) -> Tuple[bool, List[int]]:
+    ) -> Tuple[bool, List[Dict[str, Any]]]:
         """
-        Checks a repository's issues page via Playwright for open issues with the label.
+        Checks a repository's issues page via Playwright for open issues matching the query.
+        If issues are found, fetches their number, title, and description.
 
         Args:
             repo_full_name: The 'owner/repo' name string.
-            label: The issue label to search for.
+            label: The issue label to include in the search query.
 
         Returns:
-            A tuple: (bool indicating if issues were found, list of found issue numbers).
+            A tuple: (bool indicating if issues were found, list of issue detail dicts).
+            Each dict contains: {'number': int, 'title': str, 'description': str}
         """
         if not self._browser or not self._playwright:
             print(
                 "[red][BrowserChecker] Playwright/Browser not initialized. Cannot perform check."
             )
-            return False
+            return False, []  # Return tuple (bool, list)
 
         page = None
-        # Construct the raw query string, keeping the label quoted
-        raw_query = f'is:issue state:open label:"{label}"'
+        # Construct the raw query string, including no:assignee and no:parent-issue
+        raw_query = f'is:issue state:open label:"{label}" no:assignee no:parent-issue'
         # URL encode the *entire* query string once using quote_plus for query parameters
         encoded_query = urllib.parse.quote_plus(raw_query)
         # Construct the final URL
@@ -131,6 +209,7 @@ class BrowserIssueChecker:
 
         found_issue_flag = False
         issue_numbers: List[int] = []
+        found_issues_details: List[Dict[str, Any]] = []  # Store full details
 
         try:
             print(f"[BrowserChecker] Getting new page for {repo_full_name}...")
@@ -204,6 +283,29 @@ class BrowserIssueChecker:
                                 f"[yellow]Issue link element found in row {i} but has no href attribute."
                             )
                     print(f"[BrowserChecker] Extracted issue numbers: {issue_numbers}")
+
+                    # --- Fetch details for each found issue ---
+                    if issue_numbers:
+                        print(f"  Fetching details for {len(issue_numbers)} issues...")
+                        # Reuse the same page for fetching details
+                        for issue_num in issue_numbers:
+                            issue_url = f"https://github.com/{repo_full_name}/issues/{issue_num}"
+                            details = self._fetch_issue_details(page, issue_url)
+                            if details:
+                                found_issues_details.append(
+                                    {
+                                        "number": issue_num,
+                                        "title": details["title"],
+                                        "description": details["description"],
+                                    }
+                                )
+                            else:
+                                print(
+                                    f"    [yellow]Skipping details for issue {issue_num} due to fetch error."
+                                )
+                            time.sleep(0.5)  # Small delay between issue detail fetches
+                        print("  Finished fetching details.")
+
                 else:
                     # No issue rows found, check if the "no results" message is visible
                     no_results_element = page.locator(self._NO_RESULTS_SELECTOR)
@@ -251,8 +353,8 @@ class BrowserIssueChecker:
             # print(f"[BrowserChecker] Waiting {self.check_delay:.1f}s before next check...")
             time.sleep(self.check_delay)
 
-        # Return the flag and the list of numbers (will be empty if flag is False)
-        return found_issue_flag, issue_numbers
+        # Return the flag and the list of issue details (will be empty if flag is False)
+        return found_issue_flag, found_issues_details  # Return details list
 
 
 # Example Usage (for testing)
@@ -272,21 +374,33 @@ if __name__ == "__main__":
         timeout=30000,  # Increased timeout slightly
     )
     with checker:  # Use context manager
-        has_issues, issue_nums = checker.check_repo_for_issue_label(
-            repo_to_check, label_to_check
+        has_issues, issue_details = (
+            checker.check_repo_for_issue_label(  # Renamed variable here
+                repo_to_check, label_to_check
+            )
         )
         print(
-            f"\nCheck result for {repo_to_check} with label '{label_to_check}': Found={has_issues}, Issues={issue_nums}"
+            f"\nCheck result for {repo_to_check} with label '{label_to_check}': Found={has_issues}"
         )
+        if issue_details:
+            print("  Issue Details:")
+            for issue in issue_details[:3]:  # Print details for first few
+                print(f"    - Number: {issue['number']}")
+                print(f"      Title: {issue['title'][:80]}...")
+                # print(f"      Desc: {issue['description'][:100]}...") # Can be long
+        elif has_issues:
+            print("  (Issues found, but details could not be fetched)")
 
         # Test another one (e.g., a repo likely without the label)
         repo_to_check_neg = "octocat/Spoon-Knife"
-        has_issues_neg, issue_nums_neg = checker.check_repo_for_issue_label(
+        has_issues_neg, issue_details_neg = checker.check_repo_for_issue_label(
             repo_to_check_neg, label_to_check
         )
         print(
-            f"\nCheck result for {repo_to_check_neg} with label '{label_to_check}': Found={has_issues_neg}, Issues={issue_nums_neg}"
+            f"\nCheck result for {repo_to_check_neg} with label '{label_to_check}': Found={has_issues_neg}"
         )
+        if issue_details_neg:
+            print("  Issue Details:", issue_details_neg)
 
         # Test another label on the first repo
         # result = checker.check_repo_for_issue_label("microsoft/vscode", "help wanted")
