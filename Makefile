@@ -11,9 +11,22 @@ fix:
 test:
 	PYTHONPATH=. pytest tests/
 
-# Run an example search command
+# Install Playwright browser binaries (run after install-dev)
+install-browsers:
+	@echo "Ensuring Playwright browsers are installed using venv's playwright..."
+	@.venv/bin/playwright install # Use the venv playwright explicitly
+	# Note: If the above fails due to missing OS dependencies, you might need:
+	# .venv/bin/playwright install --with-deps
+	# This attempts to install OS dependencies (may require sudo) but might fail on unsupported OS.
+
+# Run an example search command (using API checker)
 run:
-	@echo "Running example search (last 10 days, min 200 stars)..."
+	@echo "Running example search (API, last 10 days, min 200 stars)..."
 	@.venv/bin/repobird-leadgen search --label "good first issue" --language python --max-results 10 --recent-days 10 --min-stars 200
 
-.PHONY: install-dev fix test run-search-example
+# Run an example search command using the browser checker
+run-browser: install-browsers
+	@echo "Running example search (Browser, last 10 days, min 200 stars)..."
+	@.venv/bin/repobird-leadgen search --label "good first issue" --language python --max-results 10 --recent-days 10 --min-stars 200 --use-browser-checker
+
+.PHONY: install-dev fix test install-browsers run run-browser

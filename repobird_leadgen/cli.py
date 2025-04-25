@@ -193,6 +193,12 @@ def search(
         "-c",
         help=f"File to save raw repository JSON Lines data. Defaults to '[{CACHE_DIR}]/raw_repos_<label>_<lang>_<run_id>.jsonl'",
     ),
+    use_browser_checker: bool = typer.Option(
+        False,
+        "--use-browser-checker",
+        help="Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.",
+        is_flag=True, # Make it a flag like --use-browser-checker
+    )
 ) -> Optional[Path]:
     """
     Fetch repos matching criteria, cache raw data incrementally (JSONL).
@@ -239,7 +245,8 @@ def search(
 
     repo_count = 0
     try:
-        gh = GitHubSearcher() # Uses GITHUB_TOKEN from config/.env
+        # Pass the flag to the constructor
+        gh = GitHubSearcher(use_browser_checker=use_browser_checker)
 
         # search now yields results and handles incremental writing internally
         # We just need to iterate through the results to drive the process
@@ -400,9 +407,16 @@ def full_pipeline(
     output_dir: Path = typer.Option(
         OUTPUT_DIR, "--output-dir", "-o", help="Directory for summary files."
     ),
-    concurrency: int = typer.Option(
+    concurrency: int = typer.Option( # Add typer.Option call here
         CONCURRENCY, "--concurrency", "-w", help="Parallel workers for enrichment."
     ),
+    # Add the browser checker flag here too
+    use_browser_checker: bool = typer.Option(
+        False,
+        "--use-browser-checker",
+        help="Use Playwright browser automation for issue label checks during the search phase.",
+        is_flag=True,
+    )
 ) -> None:
     """
     Convenience command to run the search and enrich steps sequentially.
@@ -431,6 +445,7 @@ def full_pipeline(
             min_stars=min_stars,
             recent_days=recent_days,
             cache_file=temp_cache_path, # Pass the temp path
+            use_browser_checker=use_browser_checker, # Pass the flag
         )
 
         # Check if search succeeded and found results

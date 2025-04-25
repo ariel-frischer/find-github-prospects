@@ -10,7 +10,10 @@ import time
 import json # For saving raw data incrementally
 from pathlib import Path # For cache file path handling
 import github
-from github import RateLimitExceededException, GithubException, UnknownObjectException # Removed BadGatewayException
+from github import RateLimitExceededException, GithubException, UnknownObjectException
+
+# Import the new browser checker
+from .browser_checker import BrowserIssueChecker
 
 
 # Base query for repositories, label is handled separately
@@ -21,14 +24,31 @@ _REPO_QUERY_TEMPLATE = (
 
 
 class GitHubSearcher:
-    """Searches GitHub for repositories that fit our outreach criteria."""
+    """
+    Searches GitHub for repositories using the API and optionally checks for
+    issue labels using either the API or a browser-based checker.
+    """
 
-    def __init__(self, token: str | None = None):
-        # Use Auth.Token for authentication
+    def __init__(self, token: str | None = None, use_browser_checker: bool = False):
+        """
+        Initializes the searcher.
+
+        Args:
+            token: GitHub PAT. Defaults to GITHUB_TOKEN env var.
+            use_browser_checker: If True, use Playwright to check issue labels via frontend.
+                                 If False (default), use the API.
+        """
+        if not (token or GITHUB_TOKEN):
+             raise RuntimeError("GITHUB_TOKEN not found in environment or passed explicitly.")
+
         auth = Auth.Token(token or GITHUB_TOKEN)
         self.gh = Github(
             auth=auth, per_page=100, retry=5, timeout=15
         )
+        self.use_browser_checker = use_browser_checker
+        # Initialize checker later, only if needed, within a context manager
+        self._browser_checker_instance: Optional[BrowserIssueChecker] = None
+        print(f"[GitHubSearcher] Initialized. Using Browser Checker: {self.use_browser_checker}")
 
     def _build_repo_query(
         self, *, language: str, min_stars: int, recent_days: int
@@ -183,6 +203,8 @@ class GitHubSearcher:
         print(f"Searching GitHub repositories with query: {repo_query}")
         print(f"Filtering for repos with open issues labeled: '{label}'")
         print(f"Saving results incrementally to: {cache_file}")
+        if self.use_browser_checker:
+            print("[yellow]Using Browser Checker for issue labels (will be slower).[/]")
 
         found_count = 0
         processed_repo_count = 0
@@ -190,7 +212,15 @@ class GitHubSearcher:
         # Ensure cache directory exists
         cache_file.parent.mkdir(parents=True, exist_ok=True)
 
+        # Determine which checker function to use
+        # We need to handle the browser checker's setup/teardown lifecycle
+        checker_context = BrowserIssueChecker() if self.use_browser_checker else None
+
         try:
+            # Start browser checker context if needed
+            if checker_context:
+                checker_context.__enter__() # Manually enter context
+
             # Initial search for repositories - wrap in retry logic
             paginated_list = self._execute_with_retry(
                 self.gh.search_repositories,
@@ -216,10 +246,30 @@ class GitHubSearcher:
                         repo = self._execute_with_retry(next, repo_iterator)
                         processed_repo_count += 1
 
-                        # Check if this repo has the required open issue label (also with retry)
-                        has_label = self._execute_with_retry(
-                            self._has_open_issue_with_label, repo, label
-                        )
+                        # --- Choose Checking Method ---
+                        has_label = False
+                        if self.use_browser_checker and checker_context:
+                            # Use Browser Checker
+                            try:
+                                has_label = checker_context.check_repo_for_issue_label(repo.full_name, label)
+                            except Exception as browser_err:
+                                # Catch errors from the browser check itself
+                                print(f"[red]Error during browser check for {repo.full_name}: {browser_err}. Skipping repo.")
+                                continue # Skip to next repo
+                        else:
+                            # Use API Checker (with retry)
+                            try:
+                                has_label = self._execute_with_retry(
+                                    self._has_open_issue_with_label, repo, label
+                                )
+                            except RuntimeError as api_retry_err:
+                                # Catch failure after retries from API check
+                                print(f"[red]API check failed for {repo.full_name} after retries: {api_retry_err}. Skipping repo.")
+                                continue # Skip to next repo
+                            except GithubException as ghe:
+                                 print(f"[red]GitHub API error during label check for {repo.full_name}: {ghe}. Skipping repo.")
+                                 continue # Skip to next repo
+
 
                         if has_label:
                             found_count += 1
@@ -272,6 +322,10 @@ class GitHubSearcher:
              # Catch any other unexpected errors during setup
              print(f"[red]An unexpected error occurred during search setup: {e}")
              raise # Re-raise critical setup errors
+        finally:
+            # Ensure browser checker is closed if it was used
+            if checker_context:
+                checker_context.__exit__(None, None, None) # Manually exit context
 
 
     # These helper methods are less useful now search yields results,
