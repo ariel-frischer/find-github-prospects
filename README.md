@@ -15,7 +15,7 @@ This repository contains the `repobird-leadgen` tool, a Python CLI application d
     ```
 2.  Install the tool and its dependencies:
     ```bash
-    uv pip install -e .
+    uv pip install -r pyproject.toml --extra dev
     ```
 3.  **Install Playwright Browsers:** The optional browser-based checker requires browser binaries. Install them using:
     ```bash
