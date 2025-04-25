@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 import time
-from typing import Optional
-import urllib.parse  # Added for URL encoding
+from typing import Optional, Tuple, List  # Added Tuple, List
+import urllib.parse
 
 from playwright.sync_api import (
     Page,
@@ -21,12 +22,14 @@ class BrowserIssueChecker:
     _ISSUE_FILTER_INPUT_SELECTOR = (
         "input#repository-input"  # Updated selector based on inspection
     )
-    _ISSUE_ROW_SELECTOR = (
-        "div.IssueRow-module__row--XmR1f"  # Updated selector for issue rows
-    )
-    _NO_RESULTS_SELECTOR = (
-        "div.blankslate"  # Selector for the 'no results' message container
-    )
+    # Selector for individual issue rows (based on provided HTML)
+    _ISSUE_ROW_SELECTOR = "div.IssueRow-module__row--XmR1f"
+    # Selector for the link containing the issue title and number within a row
+    _ISSUE_LINK_SELECTOR = "a.IssuePullRequestTitle-module__ListItemTitle_1--_xOfg"
+    # Selector for the 'no results' message container
+    _NO_RESULTS_SELECTOR = "div.blankslate"
+    # Regex to extract issue number from the href of the issue link
+    _ISSUE_ID_RE = re.compile(r"/issues/(\d+)$")
 
     # Increase default timeout significantly for debugging
     def __init__(
@@ -97,7 +100,9 @@ class BrowserIssueChecker:
             print(f"[red][BrowserChecker] Error creating new browser page: {e}")
             raise
 
-    def check_repo_for_issue_label(self, repo_full_name: str, label: str) -> bool:
+    def check_repo_for_issue_label(
+        self, repo_full_name: str, label: str
+    ) -> Tuple[bool, List[int]]:
         """
         Checks a repository's issues page via Playwright for open issues with the label.
 
@@ -106,7 +111,7 @@ class BrowserIssueChecker:
             label: The issue label to search for.
 
         Returns:
-            True if at least one matching open issue is found, False otherwise.
+            A tuple: (bool indicating if issues were found, list of found issue numbers).
         """
         if not self._browser or not self._playwright:
             print(
@@ -124,7 +129,8 @@ class BrowserIssueChecker:
             f"https://github.com/{repo_full_name}/issues?q={encoded_query}"
         )
 
-        found_issue = False
+        found_issue_flag = False
+        issue_numbers: List[int] = []
 
         try:
             print(f"[BrowserChecker] Getting new page for {repo_full_name}...")
@@ -144,66 +150,97 @@ class BrowserIssueChecker:
             # 1. Issue rows to appear (meaning matches found)
             # 2. The "No results" message to appear
             # 3. A timeout (assume no results or error)
+
+            # Wait for either the first issue row OR the no results message to be attached
             results_selector = (
                 f"{self._ISSUE_ROW_SELECTOR}, {self._NO_RESULTS_SELECTOR}"
             )
-            # print(f"[BrowserChecker] Waiting for results selector '{results_selector}'...") # Removed
+            print(
+                f"[BrowserChecker] Waiting for results element '{results_selector}' to be attached..."
+            )
             try:
-                # Wait for either issue rows OR the no results blankslate
+                # Wait for either the first issue row OR the no results blankslate to be attached
                 page.wait_for_selector(
                     results_selector,
-                    state="attached",  # Try 'attached' instead of 'visible' initially
-                    timeout=self.timeout,  # Use the increased timeout
+                    state="attached",  # Wait for element to be in DOM, not necessarily visible
+                    timeout=self.timeout,
                 )
-                # print(f"[BrowserChecker] Results selector found.") # Removed
+                print(
+                    "[BrowserChecker] Results element (issue row or blankslate) attached."
+                )
 
-                # Check if any issue rows are present *after* waiting
-                # print(f"[BrowserChecker] Counting issue rows ('{self._ISSUE_ROW_SELECTOR}')...") # Removed
+                # Now check specifically which element was found and if issue rows exist
+                # Use the updated row selector directly
                 issue_rows = page.locator(self._ISSUE_ROW_SELECTOR)
-                count = issue_rows.count()  # Get count once
+                count = issue_rows.count()
+                print(
+                    f"[BrowserChecker] Found {count} potential issue row(s) matching selector '{self._ISSUE_ROW_SELECTOR}'."
+                )
+
                 if count > 0:
-                    # print(f"[BrowserChecker] Found {count} issue row(s) matching filter.") # Removed
-                    found_issue = True
+                    found_issue_flag = True
+                    # Extract issue numbers from links within rows
+                    for i in range(count):
+                        row = issue_rows.nth(i)
+                        # Find the specific link within the row
+                        link_element = row.locator(self._ISSUE_LINK_SELECTOR).first
+                        href = link_element.get_attribute("href")
+                        if href:
+                            match = self._ISSUE_ID_RE.search(href)
+                            if match:
+                                try:
+                                    issue_num = int(match.group(1))
+                                    issue_numbers.append(issue_num)
+                                except (ValueError, IndexError):
+                                    print(
+                                        f"[yellow]Could not parse issue number from href: {href}"
+                                    )
+                            else:
+                                print(
+                                    f"[yellow]Could not find issue number pattern in href: {href}"
+                                )
+                        else:
+                            print(
+                                f"[yellow]Issue link element found in row {i} but has no href attribute."
+                            )
+                    print(f"[BrowserChecker] Extracted issue numbers: {issue_numbers}")
                 else:
-                    # Check if the "no results" message is visible
-                    # print(f"[BrowserChecker] No issue rows found. Checking for 'no results' message ('{self._NO_RESULTS_SELECTOR}')...") # Removed
+                    # No issue rows found, check if the "no results" message is visible
                     no_results_element = page.locator(self._NO_RESULTS_SELECTOR)
-                    if no_results_element.is_visible():  # Check visibility here
-                        # print("[BrowserChecker] 'No results' message is visible.") # Removed
-                        pass  # No action needed, found_issue remains False
+                    if no_results_element.is_visible():
+                        print("[BrowserChecker] 'No results' message is visible.")
                     else:
-                        # This case is unlikely if the wait_for_selector worked, but possible
                         print(
-                            "[yellow][BrowserChecker] Results selector found, but neither issue rows nor 'no results' message were definitively identified."
+                            "[yellow][BrowserChecker] Neither issue rows nor 'no results' message were visible after waiting."
                         )
-                    found_issue = False
+                    found_issue_flag = False  # Ensure flag is False
 
             except PlaywrightTimeoutError:
                 print(
-                    f"[yellow][BrowserChecker] Timeout waiting for issue results for {repo_full_name}. Assuming no matching issues."
+                    f"[yellow][BrowserChecker] Timeout waiting for issue results container for {repo_full_name}. Assuming no matching issues."
                 )
-                found_issue = False
+                found_issue_flag = False
             except PlaywrightError as pe:
                 print(
                     f"[yellow][BrowserChecker] Playwright error checking results for {repo_full_name}: {pe}. Assuming no matching issues."
                 )
-                found_issue = False
+                found_issue_flag = False
 
         except PlaywrightTimeoutError:
             print(
                 f"[red][BrowserChecker] Timeout error during navigation or interaction for {repo_full_name}."
             )
-            found_issue = False
+            found_issue_flag = False
         except PlaywrightError as pe:
             print(
                 f"[red][BrowserChecker] Playwright error during check for {repo_full_name}: {pe}"
             )
-            found_issue = False
+            found_issue_flag = False
         except Exception as e:
             print(
                 f"[red][BrowserChecker] Unexpected error checking {repo_full_name}: {e}"
             )
-            found_issue = False
+            found_issue_flag = False
         finally:
             if page:
                 try:
@@ -211,10 +248,11 @@ class BrowserIssueChecker:
                 except Exception as e:
                     print(f"[yellow][BrowserChecker] Error closing page: {e}")
             # Add delay regardless of success/failure to slow down requests
-            # print(f"[BrowserChecker] Waiting {self.check_delay:.1f}s before next check...") # Removed
+            # print(f"[BrowserChecker] Waiting {self.check_delay:.1f}s before next check...")
             time.sleep(self.check_delay)
 
-        return found_issue
+        # Return the flag and the list of numbers (will be empty if flag is False)
+        return found_issue_flag, issue_numbers
 
 
 # Example Usage (for testing)
@@ -229,14 +267,27 @@ if __name__ == "__main__":
     # label_to_check = "good first issue" # Check a specific label
 
     checker = BrowserIssueChecker(
-        headless=True, check_delay=1, timeout=20000
-    )  # Run headless for testing
+        headless=True,
+        check_delay=1,
+        timeout=30000,  # Increased timeout slightly
+    )
     with checker:  # Use context manager
-        result = checker.check_repo_for_issue_label(repo_to_check, label_to_check)
+        has_issues, issue_nums = checker.check_repo_for_issue_label(
+            repo_to_check, label_to_check
+        )
         print(
-            f"\nCheck result for {repo_to_check} with label '{label_to_check}': {result}"
+            f"\nCheck result for {repo_to_check} with label '{label_to_check}': Found={has_issues}, Issues={issue_nums}"
         )
 
-        # Test another one
+        # Test another one (e.g., a repo likely without the label)
+        repo_to_check_neg = "octocat/Spoon-Knife"
+        has_issues_neg, issue_nums_neg = checker.check_repo_for_issue_label(
+            repo_to_check_neg, label_to_check
+        )
+        print(
+            f"\nCheck result for {repo_to_check_neg} with label '{label_to_check}': Found={has_issues_neg}, Issues={issue_nums_neg}"
+        )
+
+        # Test another label on the first repo
         # result = checker.check_repo_for_issue_label("microsoft/vscode", "help wanted")
         # print(f"\nCheck result for microsoft/vscode with label 'help wanted': {result}")

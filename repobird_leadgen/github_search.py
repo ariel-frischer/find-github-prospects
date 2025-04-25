@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterator, Optional, Dict, Tuple, Set  # Added Set
+from typing import Iterator, Optional, Dict, Tuple, Set, List  # Added Set, List
 import random  # For jitter
 from github import Github, Auth
 from github.Repository import Repository
@@ -51,8 +51,8 @@ class GitHubSearcher:
         # --- Issue Label Cache ---
         self.issue_cache_path = Path(CACHE_DIR) / "issue_label_cache.jsonl"
         self.issue_cache: Dict[
-            Tuple[str, str], bool
-        ] = {}  # Key: (repo_full_name, label), Value: has_label
+            Tuple[str, str], Tuple[bool, List[int]]  # Store flag and issue numbers
+        ] = {}  # Key: (repo_full_name, label), Value: (has_label, [issue_numbers])
         self._load_issue_cache()
         # --- End Issue Label Cache ---
 
@@ -79,10 +79,15 @@ class GitHubSearcher:
                     try:
                         data = json.loads(line)
                         # Basic validation - could add timestamp check later
+                        # Load issue numbers, default to empty list if missing
                         if "repo" in data and "label" in data and "has_label" in data:
-                            self.issue_cache[(data["repo"], data["label"])] = data[
-                                "has_label"
-                            ]
+                            issue_numbers = data.get(
+                                "issue_numbers", []
+                            )  # Default to []
+                            self.issue_cache[(data["repo"], data["label"])] = (
+                                data["has_label"],
+                                issue_numbers,
+                            )
                             count += 1
                         else:
                             print(
@@ -99,9 +104,14 @@ class GitHubSearcher:
             self.issue_cache = {}  # Start fresh if loading fails
 
     def _append_to_issue_cache(
-        self, repo_full_name: str, label: str, has_label: bool, html_url: str
+        self,
+        repo_full_name: str,
+        label: str,
+        has_label: bool,
+        issue_numbers: List[int],
+        html_url: str,
     ):
-        """Appends a new result (including html_url) to the issue label cache file."""
+        """Appends a new result (including html_url and issue numbers) to the issue label cache file."""
         try:
             # Ensure cache directory exists
             self.issue_cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,6 +120,7 @@ class GitHubSearcher:
                 "repo": repo_full_name,
                 "label": label,
                 "has_label": has_label,
+                "issue_numbers": issue_numbers,  # Add the list of numbers
                 "html_url": html_url,  # Add the URL
                 "checked_at": datetime.now(timezone.utc).isoformat(),  # Add timestamp
             }
@@ -306,6 +317,7 @@ class GitHubSearcher:
 
         found_count = 0
         processed_repo_count = 0
+        skipped_cached_count = 0  # Initialize counter for skipped cached repos
 
         # Ensure cache directory exists
         cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -365,14 +377,17 @@ class GitHubSearcher:
                             pbar.set_postfix_str(
                                 "Skipping cached", refresh=False
                             )  # Update progress bar status
+                            skipped_cached_count += 1  # Increment the counter
                             continue  # Skip to the next repo from GitHub search
 
                         # --- Check Issue Label Cache (secondary cache) ---
                         cache_key = (repo_full_name, label)
                         if cache_key in self.issue_cache:
-                            has_label = self.issue_cache[cache_key]
+                            has_label, issue_numbers_cache = self.issue_cache[
+                                cache_key
+                            ]  # Unpack tuple
                             print(
-                                f"  [Cache Hit] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label}"
+                                f"  [Cache Hit] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label}, Issues: {issue_numbers_cache}"
                             )
                             # Skip API/Browser check if cache hit
                             pbar.set_postfix_str(
@@ -384,14 +399,17 @@ class GitHubSearcher:
                             pbar.set_postfix_str(
                                 f"Checking {repo_full_name}...", refresh=True
                             )  # Update progress bar status
-                            has_label_result: Optional[bool] = (
-                                None  # Use Optional to track if check succeeded
-                            )
+                            # Result will be a tuple: (bool, List[int]) or None if check fails
+                            check_result: Optional[Tuple[bool, List[int]]] = None
+                            issue_numbers_check: List[
+                                int
+                            ] = []  # Store numbers from check
 
                             if self.use_browser_checker and checker_context:
                                 # Use Browser Checker
                                 try:
-                                    has_label_result = (
+                                    # Browser checker now returns a tuple
+                                    check_result = (
                                         checker_context.check_repo_for_issue_label(
                                             repo_full_name, label
                                         )
@@ -405,9 +423,15 @@ class GitHubSearcher:
                             else:
                                 # Use API Checker (with retry)
                                 try:
-                                    has_label_result = self._execute_with_retry(
+                                    # API check only returns boolean
+                                    api_has_label_result = self._execute_with_retry(
                                         self._has_open_issue_with_label, repo, label
                                     )
+                                    # Simulate the tuple structure for consistency
+                                    check_result = (
+                                        api_has_label_result,
+                                        [],
+                                    )  # API doesn't give numbers
                                 except RuntimeError as api_retry_err:
                                     # Catch failure after retries from API check
                                     print(
@@ -421,14 +445,23 @@ class GitHubSearcher:
                                     continue  # Skip to next repo
 
                             # --- Update Cache if check was successful ---
-                            if has_label_result is not None:
-                                has_label = has_label_result  # Assign the result
-                                self.issue_cache[cache_key] = has_label
+                            if check_result is not None:
+                                has_label, issue_numbers_check = (
+                                    check_result  # Unpack result
+                                )
+                                self.issue_cache[cache_key] = (
+                                    has_label,
+                                    issue_numbers_check,
+                                )  # Store tuple
                                 self._append_to_issue_cache(
-                                    repo_full_name, label, has_label, repo.html_url
-                                )  # Pass html_url
+                                    repo_full_name,
+                                    label,
+                                    has_label,
+                                    issue_numbers_check,
+                                    repo.html_url,
+                                )
                                 print(
-                                    f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label}. Cached."
+                                    f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label}, Issues: {issue_numbers_check}. Cached."
                                 )
                             else:
                                 # Check failed (API or Browser), skip this repo for qualification
@@ -455,7 +488,24 @@ class GitHubSearcher:
                             print(f"      URL: {repo.html_url}")
                             print(f"      ({found_count}/{max_results})")
 
-                            # Write raw data to cache file immediately
+                            # Determine which issue numbers list to use (cache or check result)
+                            numbers_to_save = []
+                            if cache_key in self.issue_cache:
+                                _, numbers_to_save = self.issue_cache[
+                                    cache_key
+                                ]  # Use cached numbers
+                            elif check_result is not None:
+                                _, numbers_to_save = (
+                                    check_result  # Use numbers from the check
+                                )
+
+                            # Add the found issue numbers to the raw data before saving
+                            # Use a custom key to avoid conflicts with GitHub API fields
+                            repo.raw_data["_repobird_found_issue_numbers"] = (
+                                numbers_to_save
+                            )
+
+                            # Write raw data (now including issue numbers) to cache file immediately
                             json.dump(repo.raw_data, f_cache)
                             f_cache.write("\n")  # Newline for JSONL format
                             f_cache.flush()  # Ensure it's written to disk
@@ -490,6 +540,11 @@ class GitHubSearcher:
             else:
                 print(
                     f"\nSuccessfully found and cached {found_count} repositories meeting all criteria."
+                )
+            # Report skipped count if any were skipped
+            if skipped_cached_count > 0:
+                print(
+                    f"Skipped {skipped_cached_count} repositories already present in the cache file."
                 )
 
         except RuntimeError as e:
