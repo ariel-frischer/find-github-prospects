@@ -1,24 +1,26 @@
-import pytest
 from repobird_leadgen.utils import parallel_map
 import time
 import random
 import re
 
 # ANSI escape code pattern
-ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*[mK]')
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*[mK]")
+
 
 def strip_ansi_codes(text):
     """Removes ANSI escape codes from a string."""
     # First, handle the raw escape characters captured by pytest
-    text = text.replace('\x1b', '')
+    text = text.replace("\x1b", "")
     # Then, use regex to remove the ANSI sequences
-    return re.sub(r'\[[0-9;]*[mK]', '', text)
+    return re.sub(r"\[[0-9;]*[mK]", "", text)
+
 
 # Helper function for successful execution
 def square(x):
     # Simulate some work
     time.sleep(random.uniform(0.01, 0.05))
     return x * x
+
 
 # Helper function that raises an exception
 def raise_exception(x):
@@ -28,10 +30,11 @@ def raise_exception(x):
     time.sleep(random.uniform(0.01, 0.05))
     return x
 
+
 # Helper function that simulates long processing for one item
 def slow_square(x):
     if x == 2:
-        time.sleep(0.2) # Simulate long work for item '2'
+        time.sleep(0.2)  # Simulate long work for item '2'
     else:
         time.sleep(random.uniform(0.01, 0.05))
     return x * x
@@ -43,6 +46,7 @@ def test_parallel_map_success():
     expected_results = [1, 4, 9, 16, 25]
     results = parallel_map(square, inputs, max_workers=4)
     assert results == expected_results
+
 
 def test_parallel_map_exception_handling(capsys):
     """Test parallel_map with a function that raises an exception for some inputs."""
@@ -65,6 +69,7 @@ def test_parallel_map_empty_input():
     results = parallel_map(square, inputs, max_workers=2)
     assert results == []
 
+
 def test_parallel_map_order_preserved_despite_processing_time():
     """Test that result order corresponds to input order, not completion order."""
     inputs = [1, 2, 3, 4]
@@ -72,10 +77,10 @@ def test_parallel_map_order_preserved_despite_processing_time():
     results = parallel_map(slow_square, inputs, max_workers=4)
     assert results == expected_results
 
+
 def test_parallel_map_single_worker():
     """Test parallel_map behaves correctly when max_workers=1 (sequentially)."""
     inputs = [1, 2, 3, 4, 5]
     expected_results = [1, 4, 9, 16, 25]
     results = parallel_map(square, inputs, max_workers=1)
     assert results == expected_results
-

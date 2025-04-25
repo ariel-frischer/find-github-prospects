@@ -5,10 +5,8 @@ from typing import List, Optional
 import typer
 from rich import print
 from github import GithubException, RateLimitExceededException, Repository
-import time
 from datetime import datetime
-import uuid
-import traceback # For printing stack traces on error
+import traceback  # For printing stack traces on error
 
 # Import local modules
 from .github_search import GitHubSearcher
@@ -44,36 +42,47 @@ def _load_repos_from_cache(
                 raw_repo_count += 1
                 line = line.strip()
                 if not line:
-                    continue # Skip empty lines
+                    continue  # Skip empty lines
                 try:
                     r_data = json.loads(line)
                     if not isinstance(r_data, dict) or "full_name" not in r_data:
-                         print(f"[yellow]Warning: Skipping invalid line in cache: {line[:100]}...")
-                         continue
+                        print(
+                            f"[yellow]Warning: Skipping invalid line in cache: {line[:100]}..."
+                        )
+                        continue
 
                     # Rehydrate using the authenticated Github object from GitHubSearcher
                     # Apply retry logic here as well, though less critical than search/enrich
                     # Using the internal retry mechanism of GitHubSearcher if available,
                     # otherwise a simple retry. Let's assume gh_instance has _execute_with_retry
-                    repo = gh_searcher._execute_with_retry(
-                        gh_searcher.gh.get_repo, r_data["full_name"]
+                    repo = gh_instance._execute_with_retry(  # Use gh_instance here
+                        gh_instance.gh.get_repo,
+                        r_data["full_name"],  # And here
                     )
                     repos.append(repo)
 
                 except json.JSONDecodeError:
-                    print(f"[yellow]Warning: Skipping invalid JSON line in cache: {line[:100]}...")
+                    print(
+                        f"[yellow]Warning: Skipping invalid JSON line in cache: {line[:100]}..."
+                    )
                 except RateLimitExceededException:
                     # Should be handled by _execute_with_retry now
                     print("[yellow]Rate limit hit during repo rehydration. Retrying...")
                     # The retry logic should handle waiting
                 except GithubException as e:
-                     # Handled by retry logic, but log if it ultimately fails
-                     print(f"[yellow]Warning: Could not rehydrate repo {r_data.get('full_name', 'Unknown')} after retries: {e.status} {e.data}. Skipping.")
+                    # Handled by retry logic, but log if it ultimately fails
+                    print(
+                        f"[yellow]Warning: Could not rehydrate repo {r_data.get('full_name', 'Unknown')} after retries: {e.status} {e.data}. Skipping."
+                    )
                 except Exception as e:
-                     # Catch unexpected errors during rehydration of a single repo
-                     print(f"[yellow]Warning: Unexpected error rehydrating repo {r_data.get('full_name', 'Unknown')}: {e}. Skipping.")
+                    # Catch unexpected errors during rehydration of a single repo
+                    print(
+                        f"[yellow]Warning: Unexpected error rehydrating repo {r_data.get('full_name', 'Unknown')}: {e}. Skipping."
+                    )
 
-        print(f"Successfully rehydrated {len(repos)} out of {raw_repo_count} entries from cache.")
+        print(
+            f"Successfully rehydrated {len(repos)} out of {raw_repo_count} entries from cache."
+        )
         return repos
 
     except Exception as e:
@@ -197,8 +206,8 @@ def search(
         False,
         "--use-browser-checker",
         help="Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.",
-        is_flag=True, # Make it a flag like --use-browser-checker
-    )
+        is_flag=True,  # Make it a flag like --use-browser-checker
+    ),
 ) -> Optional[Path]:
     """
     Fetch repos matching criteria, cache raw data incrementally (JSONL).
@@ -228,11 +237,13 @@ def search(
     else:
         # Ensure the provided filename also ends with .jsonl for consistency
         if cache_file.suffix != ".jsonl":
-             print(f"[yellow]Warning: Provided cache file '{cache_file}' does not end with '.jsonl'. Appending suffix.")
-             cache_file = cache_file.with_suffix(".jsonl")
-             print(f"  Adjusted cache file path: {cache_file}")
+            print(
+                f"[yellow]Warning: Provided cache file '{cache_file}' does not end with '.jsonl'. Appending suffix."
+            )
+            cache_file = cache_file.with_suffix(".jsonl")
+            print(f"  Adjusted cache file path: {cache_file}")
         else:
-             print(f"  Using specified cache file: {cache_file}")
+            print(f"  Using specified cache file: {cache_file}")
 
     # Clear the cache file if it exists before starting the search
     if cache_file.exists():
@@ -256,29 +267,36 @@ def search(
             max_results=max_results,
             min_stars=min_stars,
             recent_days=recent_days,
-            cache_file=cache_file, # Pass the path for incremental writes
+            cache_file=cache_file,  # Pass the path for incremental writes
         ):
             repo_count += 1
             # Printing is now handled inside gh.search after finding qualified repo
 
         # Final status message based on whether any repos were found/cached
         if repo_count > 0:
-            print(f"\n[green]Search complete. Saved {repo_count} repo details incrementally to → {cache_file}")
-            return cache_file # Return path for chaining in 'full' command
+            print(
+                f"\n[green]Search complete. Saved {repo_count} repo details incrementally to → {cache_file}"
+            )
+            return cache_file  # Return path for chaining in 'full' command
         else:
             # Check if the file exists but is empty (search ran but found nothing)
             if cache_file.exists() and cache_file.stat().st_size == 0:
-                 print(f"[yellow]No repositories found matching the criteria. Empty cache file created: {cache_file}")
+                print(
+                    f"[yellow]No repositories found matching the criteria. Empty cache file created: {cache_file}"
+                )
             elif not cache_file.exists():
-                 print("[red]Search process did not create a cache file, likely due to an early error.")
-            else: # File exists but might have partial data if interrupted badly
-                 print(f"[yellow]Search completed, but no repositories met all criteria. Cache file may contain partial data if interrupted: {cache_file}")
+                print(
+                    "[red]Search process did not create a cache file, likely due to an early error."
+                )
+            else:  # File exists but might have partial data if interrupted badly
+                print(
+                    f"[yellow]Search completed, but no repositories met all criteria. Cache file may contain partial data if interrupted: {cache_file}"
+                )
             # Don't return cache_file if no repos were successfully found and saved.
             # This prevents 'enrich' from running on an empty/failed cache.
             return None
 
-
-    except RuntimeError as e: # Catch config errors or retry failures
+    except RuntimeError as e:  # Catch config errors or retry failures
         print(f"[red]Error during search: {e}")
         # traceback.print_exc() # Optional: print stack trace for debugging
         raise typer.Exit(code=1)
@@ -342,7 +360,9 @@ def enrich(
         repos = _load_repos_from_cache(cache_file, gh_searcher)
 
         if not repos:
-            print("[yellow]No repositories successfully loaded from cache. Nothing to enrich.")
+            print(
+                "[yellow]No repositories successfully loaded from cache. Nothing to enrich."
+            )
             raise typer.Exit()
 
         # Define the processing function for parallel_map
@@ -407,7 +427,7 @@ def full_pipeline(
     output_dir: Path = typer.Option(
         OUTPUT_DIR, "--output-dir", "-o", help="Directory for summary files."
     ),
-    concurrency: int = typer.Option( # Add typer.Option call here
+    concurrency: int = typer.Option(  # Add typer.Option call here
         CONCURRENCY, "--concurrency", "-w", help="Parallel workers for enrichment."
     ),
     # Add the browser checker flag here too
@@ -416,7 +436,7 @@ def full_pipeline(
         "--use-browser-checker",
         help="Use Playwright browser automation for issue label checks during the search phase.",
         is_flag=True,
-    )
+    ),
 ) -> None:
     """
     Convenience command to run the search and enrich steps sequentially.
@@ -425,7 +445,7 @@ def full_pipeline(
     """
     print("[bold blue]Starting full pipeline (search -> enrich)...[/]")
 
-    temp_cache_path = None # Initialize
+    temp_cache_path = None  # Initialize
     try:
         # Use a temporary file for the cache between steps, ensuring .jsonl suffix
         with tempfile.NamedTemporaryFile(
@@ -444,23 +464,25 @@ def full_pipeline(
             max_results=max_results,
             min_stars=min_stars,
             recent_days=recent_days,
-            cache_file=temp_cache_path, # Pass the temp path
-            use_browser_checker=use_browser_checker, # Pass the flag
+            cache_file=temp_cache_path,  # Pass the temp path
+            use_browser_checker=use_browser_checker,  # Pass the flag
         )
 
         # Check if search succeeded and found results
         if actual_cache_path is None:
-             # Search already printed messages about failure or no results
-             print("[yellow]Search step did not yield results. Skipping enrichment.")
-             raise typer.Exit() # Exit cleanly
+            # Search already printed messages about failure or no results
+            print("[yellow]Search step did not yield results. Skipping enrichment.")
+            raise typer.Exit()  # Exit cleanly
         elif not actual_cache_path.exists() or actual_cache_path.stat().st_size == 0:
-             print("[yellow]Search completed but cache file is missing or empty. Skipping enrichment.")
-             raise typer.Exit() # Exit cleanly
+            print(
+                "[yellow]Search completed but cache file is missing or empty. Skipping enrichment."
+            )
+            raise typer.Exit()  # Exit cleanly
 
         # --- Enrich Step ---
         # Call the enrich command function programmatically using the actual cache path
         enrich(
-            cache_file=actual_cache_path, # Use the path returned by search
+            cache_file=actual_cache_path,  # Use the path returned by search
             output_formats=output_formats,
             output_dir=output_dir,
             concurrency=concurrency,
@@ -482,7 +504,9 @@ def full_pipeline(
                 temp_cache_path.unlink()
                 print(f"Cleaned up temporary cache file: {temp_cache_path}")
             except Exception as e:
-                print(f"[yellow]Warning: Could not delete temporary cache file {temp_cache_path}: {e}")
+                print(
+                    f"[yellow]Warning: Could not delete temporary cache file {temp_cache_path}: {e}"
+                )
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-import pytest
 from datetime import datetime
 from repobird_leadgen.models import ContactInfo, RepoSummary
 
 # Tests for ContactInfo
+
 
 def test_contactinfo_instantiation_all_fields():
     """Test ContactInfo instantiation with all fields provided."""
@@ -14,12 +14,14 @@ def test_contactinfo_instantiation_all_fields():
     assert contact.twitter == twitter
     assert contact.blog == blog
 
+
 def test_contactinfo_instantiation_required_only():
     """Test ContactInfo instantiation with only default fields (empty list for emails)."""
     contact = ContactInfo()
     assert contact.emails == []
     assert contact.twitter is None
     assert contact.blog is None
+
 
 def test_contactinfo_instantiation_some_optional():
     """Test ContactInfo instantiation with some optional fields."""
@@ -30,7 +32,9 @@ def test_contactinfo_instantiation_some_optional():
     assert contact.twitter == twitter
     assert contact.blog is None
 
+
 # Tests for RepoSummary
+
 
 def test_reposummary_instantiation_required_only():
     """Test RepoSummary instantiation with only required fields."""
@@ -44,7 +48,7 @@ def test_reposummary_instantiation_required_only():
         good_first_issues=2,
         help_wanted_issues=3,
         last_push=now,
-        contact=ContactInfo() # Provide a default ContactInfo
+        contact=ContactInfo(),  # Provide a default ContactInfo
     )
     assert summary.full_name == "octocat/Hello-World"
     assert summary.description == "My first repository on GitHub!"
@@ -56,6 +60,7 @@ def test_reposummary_instantiation_required_only():
     assert summary.last_push == now
     assert isinstance(summary.contact, ContactInfo)
     assert summary.contact.emails == []
+
 
 def test_reposummary_instantiation_with_contact():
     """Test RepoSummary instantiation with a specific ContactInfo."""
@@ -70,7 +75,7 @@ def test_reposummary_instantiation_with_contact():
         good_first_issues=0,
         help_wanted_issues=1,
         last_push=now,
-        contact=contact_details
+        contact=contact_details,
     )
     assert summary.full_name == "test/repo"
     assert summary.description == "A test repo"
