@@ -98,8 +98,10 @@ class GitHubSearcher:
             # Decide whether to proceed with an empty cache or raise error
             self.issue_cache = {}  # Start fresh if loading fails
 
-    def _append_to_issue_cache(self, repo_full_name: str, label: str, has_label: bool):
-        """Appends a new result to the issue label cache file."""
+    def _append_to_issue_cache(
+        self, repo_full_name: str, label: str, has_label: bool, html_url: str
+    ):
+        """Appends a new result (including html_url) to the issue label cache file."""
         try:
             # Ensure cache directory exists
             self.issue_cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,6 +110,7 @@ class GitHubSearcher:
                 "repo": repo_full_name,
                 "label": label,
                 "has_label": has_label,
+                "html_url": html_url,  # Add the URL
                 "checked_at": datetime.now(timezone.utc).isoformat(),  # Add timestamp
             }
             with self.issue_cache_path.open("a", encoding="utf-8") as f:
@@ -405,8 +408,8 @@ class GitHubSearcher:
                                 has_label = has_label_result  # Assign the result
                                 self.issue_cache[cache_key] = has_label
                                 self._append_to_issue_cache(
-                                    repo_full_name, label, has_label
-                                )
+                                    repo_full_name, label, has_label, repo.html_url
+                                )  # Pass html_url
                                 print(
                                     f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label}. Cached."
                                 )
