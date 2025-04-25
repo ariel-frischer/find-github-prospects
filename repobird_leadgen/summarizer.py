@@ -48,13 +48,11 @@ def to_markdown(summaries: List[RepoSummary], outfile: Path) -> None:
     console.print(table)
 
     # Generate Markdown text for the file
-    md_content = f"# RepoBird LeadGen Prospects ({outfile.stem})
-
-"
-    md_content += "| " + " | ".join(headers) + " |
-"
-    md_content += "|" + "---|" * len(headers) + "
-"
+    md_content = (
+        f"# RepoBird LeadGen Prospects ({outfile.stem})\n\n"
+    )
+    md_content += "| " + " | ".join(headers) + " |\n"
+    md_content += "|" + "---|" * len(headers) + "\n"
     for s in summaries:
          row_data = [
              f"[{s.full_name}](https://github.com/{s.full_name})",
@@ -68,8 +66,7 @@ def to_markdown(summaries: List[RepoSummary], outfile: Path) -> None:
              f"[@{s.contact.twitter}](https://twitter.com/{s.contact.twitter})" if s.contact.twitter else "-",
              f"[Blog]({s.contact.blog})" if s.contact.blog else "-",
          ]
-         md_content += "| " + " | ".join(row_data) + " |
-"
+         md_content += "| " + " | ".join(row_data) + " |\n" # Added closing quote
 
     try:
         outfile.write_text(md_content, encoding='utf-8')

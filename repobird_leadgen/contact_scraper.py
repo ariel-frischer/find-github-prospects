@@ -12,7 +12,8 @@ import github # Make sure github module is imported for GithubException
 # More robust email regex (RFC 5322 simplified)
 _EMAIL_RE = re.compile(r"""(?:[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*|"(?:[--!#-[]-]|\[-	-])*")@(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|\[(?:(?:(2(5[0-5]|[0-4][0-9])|1[0-9][0-9]|[1-9]?[0-9]))\.){3}(?:(2(5[0-5]|[0-4][0-9])|1[0-9][0-9]|[1-9]?[0-9])|[a-z0-9-]*[a-z0-9]:(?:[--!-ZS-]|\[-	-])+)\])""", re.IGNORECASE)
 _TWITTER_RE = re.compile(r"(?:https?://)?(?:www\.)?twitter\.com/([A-Za-z0-9_]{1,15})")
-_BLOG_URL_RE = re.compile(r"(?:blog|website|homepage)[:\s]*?(https?://[^\s'"]+)", re.IGNORECASE) # Simple blog/website finder
+# Simple blog/website finder (quotes inside the character class escaped by switching to single-quoted raw string)
+_BLOG_URL_RE = re.compile(r'(?:blog|website|homepage)[:\s]*?(https?://[^\s\'"]+)', re.IGNORECASE) # Simple blog/website finder
 
 # Files often containing contact info
 _CONTACT_FILES = ["README.md", "README", "CONTRIBUTING.md", "AUTHORS", "AUTHORS.txt", "CODE_OF_CONDUCT.md", "SECURITY.md", "LICENSE", "package.json", "setup.py", "pyproject.toml"]

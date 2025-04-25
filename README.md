@@ -14,11 +14,7 @@ This repository contains the `repobird-leadgen` tool, a Python CLI application d
     ```
 2.  Install the tool and its dependencies using `uv` (recommended) or `pip`:
     ```bash
-    # Using uv
-    uv pip install .
-
-    # Or using pip
-    pip install .
+    uv pip install -e .
     ```
 
 ### Configuration

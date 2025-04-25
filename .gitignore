@@ -48,3 +48,4 @@ nosetests.xml
 # OS-Specific Files
 .DS_Store
 Thumbs.db
+.aider*
