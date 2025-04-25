@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+repobird_leadgen/__init__.py
+repobird_leadgen/cli.py
+repobird_leadgen/config.py
+repobird_leadgen/contact_scraper.py
+repobird_leadgen/github_search.py
+repobird_leadgen/models.py
+repobird_leadgen/summarizer.py
+repobird_leadgen/utils.py
+repobird_leadgen.egg-info/PKG-INFO
+repobird_leadgen.egg-info/SOURCES.txt
+repobird_leadgen.egg-info/dependency_links.txt
+repobird_leadgen.egg-info/entry_points.txt
+repobird_leadgen.egg-info/requires.txt
+repobird_leadgen.egg-info/top_level.txt
+tests/test_search.py
