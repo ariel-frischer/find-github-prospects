@@ -1,11 +1,10 @@
 import json
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set  # Added Set
 import typer
 from rich import print
 from github import GithubException, RateLimitExceededException, Repository
-from datetime import datetime
 import traceback  # For printing stack traces on error
 
 # Import local modules
@@ -230,10 +229,17 @@ def search(
         safe_label = "".join(c if c.isalnum() else "_" for c in label)
         safe_lang = "".join(c if c.isalnum() else "_" for c in language)
         # Generate unique run ID using timestamp
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Ensure the extension is .jsonl
-        cache_file = cache_dir / f"raw_repos_{safe_label}_{safe_lang}_{run_id}.jsonl"
-        print(f"  Using default cache file with run ID: {cache_file}")
+        # Generate filename based on parameters
+        filename_parts = [
+            "raw_repos",
+            f"label_{safe_label}",
+            f"lang_{safe_lang}",
+            f"stars_{min_stars}",
+            f"days_{recent_days}",
+        ]
+        cache_filename = "_".join(filename_parts) + ".jsonl"
+        cache_file = cache_dir / cache_filename
+        print(f"  Using parameter-based cache file: {cache_file}")
     else:
         # Ensure the provided filename also ends with .jsonl for consistency
         if cache_file.suffix != ".jsonl":
@@ -245,16 +251,40 @@ def search(
         else:
             print(f"  Using specified cache file: {cache_file}")
 
-    # Clear the cache file if it exists before starting the search
+    # --- Load existing repo names from cache ---
+    existing_repo_names: Set[str] = set()
     if cache_file.exists():
-        print(f"[yellow]Warning: Cache file {cache_file} exists. Overwriting.")
+        print(f"Loading existing repos from cache: {cache_file}")
         try:
-            cache_file.unlink()
-        except OSError as e:
-            print(f"[red]Error removing existing cache file {cache_file}: {e}")
-            raise typer.Exit(code=1)
+            with cache_file.open("r", encoding="utf-8") as f_cache_read:
+                for line in f_cache_read:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        # Use .get() for safer access to 'full_name'
+                        repo_name = data.get("full_name")
+                        if isinstance(data, dict) and repo_name:
+                            existing_repo_names.add(repo_name)
+                    except json.JSONDecodeError:
+                        print(
+                            f"[yellow]Warning: Skipping invalid JSON line during pre-load: {line[:100]}..."
+                        )
+            print(f"Found {len(existing_repo_names)} existing repos in cache.")
+        except Exception as e:
+            print(
+                f"[red]Error reading existing cache file {cache_file}: {e}. Proceeding without skipping."
+            )
+            existing_repo_names = set()  # Reset on error
+    else:
+        print(f"Cache file {cache_file} not found. Starting fresh.")
+    # --- End loading existing repo names ---
 
-    repo_count = 0
+    # We no longer delete the cache file, we append to it.
+    # The search function itself handles opening in append mode.
+
+    newly_added_count = 0  # Changed from repo_count
     try:
         # Pass the flag to the constructor
         gh = GitHubSearcher(use_browser_checker=use_browser_checker)
@@ -268,17 +298,24 @@ def search(
             min_stars=min_stars,
             recent_days=recent_days,
             cache_file=cache_file,  # Pass the path for incremental writes
+            existing_repo_names=existing_repo_names,  # Pass existing names
         ):
-            repo_count += 1
+            newly_added_count += 1  # Count only newly added repos
             # Printing is now handled inside gh.search after finding qualified repo
 
-        # Final status message based on whether any repos were found/cached
-        if repo_count > 0:
+        # Final status message based on whether any *new* repos were found/cached
+        if newly_added_count > 0:
             print(
-                f"\n[green]Search complete. Saved {repo_count} repo details incrementally to → {cache_file}"
+                f"\n[green]Search complete. Added {newly_added_count} new repo details to → {cache_file}"
             )
             return cache_file  # Return path for chaining in 'full' command
         else:
+            print(
+                f"\n[yellow]Search complete. No *new* repositories matching the criteria were added to → {cache_file}"
+            )
+            # Still return the path if it exists, as enrich might still be useful
+            if cache_file.exists():
+                return cache_file
             # Check if the file exists but is empty (search ran but found nothing)
             if cache_file.exists() and cache_file.stat().st_size == 0:
                 print(

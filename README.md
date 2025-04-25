@@ -62,7 +62,7 @@ Finds repositories matching your criteria and saves the raw data to a JSON cache
     *   `--max-results` / `-n` INTEGER: Maximum number of repositories to fetch (default: 30).
     *   `--min-stars` / `-s` INTEGER: Minimum number of stars a repository must have (default: 20).
     *   `--recent-days` / `-d` INTEGER: Maximum number of days since the last push activity (default: 365).
-    *   `--cache-file` / `-c` PATH: Path to save the output JSON Lines cache file (defaults to `cache/raw_repos_<label>_<lang>_<run_id>.jsonl`). Results are saved incrementally.
+    *   `--cache-file` / `-c` PATH: Path to save the output JSON Lines cache file. If not specified, a filename is generated based on the search parameters (label, language, stars, days) in the `cache/` directory (e.g., `cache/raw_repos_label_good_first_issue_lang_python_stars_20_days_365.jsonl`). If the file already exists, new results are appended, skipping duplicates.
     *   `--use-browser-checker`: Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.
 
 **2. `enrich`**

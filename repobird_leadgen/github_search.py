@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterator, Optional, Dict, Tuple  # Added Dict, Tuple
+from typing import Iterator, Optional, Dict, Tuple, Set  # Added Set
 import random  # For jitter
 from github import Github, Auth
 from github.Repository import Repository
@@ -285,11 +285,13 @@ class GitHubSearcher:
         language: str = "python",
         min_stars: int = 20,
         recent_days: int = 365,
-        max_results: int = 50,  # Target number of *qualified* repos
+        max_results: int = 50,  # Target number of *newly qualified* repos to find
         cache_file: Path,  # Pass cache file path for incremental writing
+        existing_repo_names: Optional[Set[str]] = None,  # Added set of existing names
     ) -> Iterator[Repository]:
         """
-        Searches repositories, filters by open issue label, yields qualified repos,
+        Searches repositories, filters by open issue label, skipping already cached repos,
+        yields newly qualified repos, and saves them incrementally to the cache file.
         and saves them incrementally to the cache file (JSONL format).
         Handles rate limits with backoff and retry.
         """
@@ -354,7 +356,18 @@ class GitHubSearcher:
                         processed_repo_count += 1
                         repo_full_name = repo.full_name  # Get once
 
-                        # --- Check Issue Label Cache ---
+                        # --- Skip if already in the main cache file ---
+                        if (
+                            existing_repo_names
+                            and repo_full_name in existing_repo_names
+                        ):
+                            # print(f"  Skipping {repo_full_name} (already in main cache: {cache_file.name})")
+                            pbar.set_postfix_str(
+                                "Skipping cached", refresh=False
+                            )  # Update progress bar status
+                            continue  # Skip to the next repo from GitHub search
+
+                        # --- Check Issue Label Cache (secondary cache) ---
                         cache_key = (repo_full_name, label)
                         if cache_key in self.issue_cache:
                             has_label = self.issue_cache[cache_key]
@@ -362,11 +375,15 @@ class GitHubSearcher:
                                 f"  [Cache Hit] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label}"
                             )
                             # Skip API/Browser check if cache hit
+                            pbar.set_postfix_str(
+                                f"Checking {repo_full_name}...", refresh=True
+                            )  # Update progress bar status
                         else:
                             # --- Cache Miss - Choose Checking Method ---
-                            print(
-                                f"  [Cache Miss] Checking Repo: {repo_full_name}, Label: '{label}'..."
-                            )
+                            # print(f"  [Cache Miss] Checking Repo: {repo_full_name}, Label: '{label}'...") # Can be verbose
+                            pbar.set_postfix_str(
+                                f"Checking {repo_full_name}...", refresh=True
+                            )  # Update progress bar status
                             has_label_result: Optional[bool] = (
                                 None  # Use Optional to track if check succeeded
                             )
@@ -430,6 +447,9 @@ class GitHubSearcher:
                         if has_label:
                             found_count += 1  # Increment count only ONCE here
                             pbar.update(1)
+                            pbar.set_postfix_str(
+                                "Found qualified", refresh=False
+                            )  # Update progress bar status
                             # Print details immediately
                             print(f"\n  [+] Qualified: {repo.full_name}")
                             print(f"      URL: {repo.html_url}")
