@@ -1,3 +1,14 @@
 Metadata-Version: 2.4
-Name: repobird_leadgen
-Version: 0.0.0
+Name: repobird-leadgen
+Version: 0.1.0
+Summary: Lead‑gen automation for RepoBird marketing
+Author-email: YOUR NAME <you@example.com>
+Requires-Python: >=3.9
+Requires-Dist: PyGithub==2.2.0
+Requires-Dist: python-dotenv==1.0.0
+Requires-Dist: typer==0.9.0
+Requires-Dist: requests==2.32.0
+Requires-Dist: tqdm==4.66.2
+Requires-Dist: rich==13.7.1
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.5; extra == "dev"
