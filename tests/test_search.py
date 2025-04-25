@@ -234,14 +234,17 @@ def test_search_rate_limit_during_iteration(mock_sleep, mock_tqdm_class, mock_au
     # searcher.gh is mock_github['instance']
 
     repo1 = mock_repository
-    mock_iterator_retry = MagicMock()
-    # Simulate: yield repo1, raise RateLimit, yield StopIteration after wait/retry
-    # Make sure the exception has the attributes the SUT uses in the except block
     rate_limit_exception = RateLimitExceededException(status=403, data={}, headers={})
-    mock_iterator_retry.__next__.side_effect = [repo1, rate_limit_exception, StopIteration]
-    # Configure the iterable mock
-    mock_github['search_results'].__iter__.return_value = mock_iterator_retry
-    mock_github['search_results'].totalCount = 2
+
+    # Define a generator to simulate the iterator behavior
+    def rate_limit_iterator():
+        yield repo1
+        raise rate_limit_exception
+        # StopIteration is implicitly raised after the generator finishes
+
+    # Configure the iterable mock to use the generator
+    mock_github['search_results'].__iter__.return_value = rate_limit_iterator()
+    mock_github['search_results'].totalCount = 2 # Still need totalCount for tqdm
 
     # Adjust the reset time on the pre-configured mock rate limit object
     mock_github['rate_limit_info'].search.reset = datetime.now(timezone.utc) + timedelta(seconds=0.01)
@@ -250,7 +253,7 @@ def test_search_rate_limit_during_iteration(mock_sleep, mock_tqdm_class, mock_au
 
     mock_github['instance'].search_repositories.assert_called_once()
     # Assert get_rate_limit was called *on the instance* after the exception
-    mock_github['instance'].get_rate_limit.assert_called_once() # Use standard assertion
+    mock_github['instance'].get_rate_limit.assert_called_once() # Assert on mock_github['instance']
     mock_sleep.assert_called_once() # Sleep should be called
 
     # Check tqdm call using call_args
@@ -290,26 +293,29 @@ def test_search_rate_limit_on_initial_search(mock_tqdm_class, mock_auth, mock_gi
 # @patch('builtins.print') # Temporarily removed for debugging
 def test_search_generic_github_exception_during_iteration(mock_sleep, mock_tqdm_class, mock_auth, mock_github, mock_repository):
     # Configure the mock tqdm class
-    mock_pbar = MagicMock()
-    mock_pbar.update = MagicMock()
-    mock_pbar.close = MagicMock()
-    mock_tqdm_context = MagicMock()
-    mock_tqdm_context.__enter__.return_value = mock_pbar
-    mock_tqdm_context.__exit__.return_value = None
-    mock_tqdm_class.return_value = mock_tqdm_context
+    mock_pbar = MagicMock(name='mock_pbar_instance') # Add name for clarity
+    mock_pbar.update = MagicMock(name='mock_pbar_update')
+    mock_pbar.close = MagicMock(name='mock_pbar_close')
+    # Configure the main patch object (mock_tqdm_class) directly
+    mock_tqdm_instance = mock_tqdm_class.return_value
+    mock_tqdm_instance.__enter__.return_value = mock_pbar
+    mock_tqdm_instance.__exit__.return_value = None
 
     searcher = GitHubSearcher(token="dummy") # Uses mocks for init
     # searcher.gh is mock_github['instance']
 
     repo1 = mock_repository
-    mock_iterator = MagicMock()
-    # Simulate: yield repo1, raise GithubException, yield StopIteration
-    # Make sure the exception has the attributes the SUT uses in the except block
     generic_exception = GithubException(status=500, data={}, headers={})
-    mock_iterator.__next__.side_effect = [repo1, generic_exception, StopIteration]
-    # Configure the iterable mock
-    mock_github['search_results'].__iter__.return_value = mock_iterator
-    mock_github['search_results'].totalCount = 2
+
+    # Define a generator to simulate the iterator behavior
+    def generic_exception_iterator():
+        yield repo1
+        raise generic_exception
+        # StopIteration is implicitly raised after the generator finishes
+
+    # Configure the iterable mock to use the generator
+    mock_github['search_results'].__iter__.return_value = generic_exception_iterator()
+    mock_github['search_results'].totalCount = 2 # Still need totalCount for tqdm
 
     results = searcher.search(label="test", language="any", min_stars=0, recent_days=365)
 
@@ -323,9 +329,7 @@ def test_search_generic_github_exception_during_iteration(mock_sleep, mock_tqdm_
 
     # Check update on the pbar instance was called twice:
     # Once for the successful repo, once for the skipped repo
-    assert mock_pbar.update.call_count == 2
-    # Revert to simpler check first:
-    # mock_pbar.update.assert_has_calls([call(1), call(1)]) # Check arguments too
+    assert mock_pbar.update.call_count == 2 # Assert call count directly
 
     assert len(results) == 1 # SUT catches exception and continues, returns only repo1
     assert results[0] == repo1
