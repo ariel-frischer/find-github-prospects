@@ -1,0 +1,50 @@
+# Bytecode and Cache Files
+*.py[cod]
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+virtualenv/
+.direnv/
+
+# Distribution and Build Artifacts
+dist/
+build/
+*.egg-info/
+*.whl
+*.egg
+
+# Compiled Files
+*.so
+*.o
+
+# IDE/Editor Configuration
+.vscode/
+.idea/
+*.sublime-*
+.project
+.pydevproject
+
+# Secrets and Local Configuration
+.env*
+secrets.*
+local_settings.py
+
+# Testing and Coverage
+.coverage*
+coverage.xml
+htmlcov/
+nosetests.xml
+
+# Log Files
+*.log
+
+# OS-Specific Files
+.DS_Store
+Thumbs.db
