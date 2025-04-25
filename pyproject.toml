@@ -19,6 +19,7 @@ repobird-leadgen = "repobird_leadgen.cli:app"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.5",
+    "ruff",
 ]
 
 [tool.pytest.ini_options]

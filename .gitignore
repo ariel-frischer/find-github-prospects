@@ -49,3 +49,4 @@ nosetests.xml
 .DS_Store
 Thumbs.db
 .aider*
+.ra-aid/
