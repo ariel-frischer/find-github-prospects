@@ -11,11 +11,12 @@ class BrowserIssueChecker:
     """Uses Playwright to check GitHub frontend for open issues with a specific label."""
 
     # More specific selectors might be needed if GitHub UI changes
-    _ISSUE_FILTER_INPUT_SELECTOR = "input#js-issues-search"
+    _ISSUE_FILTER_INPUT_SELECTOR = "input#repository-input" # Updated selector based on inspection
     _ISSUE_ROW_SELECTOR = "div.js-navigation-container div.js-issue-row" # Selector for issue list items
     _NO_RESULTS_SELECTOR = "div.blankslate" # Selector for the 'no results' message container
 
-    def __init__(self, headless: bool = True, check_delay: float = 2.0, timeout: int = 15000):
+    # Increase default timeout significantly for debugging
+    def __init__(self, headless: bool = True, check_delay: float = 2.0, timeout: int = 45000):
         """
         Initializes the checker.
 
@@ -101,43 +102,57 @@ class BrowserIssueChecker:
         found_issue = False
 
         try:
+            print(f"[BrowserChecker] Getting new page for {repo_full_name}...")
             page = self._get_new_page()
-            print(f"[BrowserChecker] Navigating to {issues_url} for '{label}' check...")
-            page.goto(issues_url, wait_until="domcontentloaded") # Wait for DOM, not full load
+            print(f"[BrowserChecker] Navigating to {issues_url}...")
+            page.goto(issues_url, wait_until="domcontentloaded", timeout=self.timeout) # Apply timeout here too
+            print(f"[BrowserChecker] Navigation to {issues_url} successful.")
 
             # Wait for the filter input to be visible and interactable
+            print(f"[BrowserChecker] Waiting for filter input '{self._ISSUE_FILTER_INPUT_SELECTOR}'...")
             filter_input = page.locator(self._ISSUE_FILTER_INPUT_SELECTOR)
             filter_input.wait_for(state="visible", timeout=self.timeout)
-            print(f"[BrowserChecker] Applying filter: '{filter_query}'")
+            print(f"[BrowserChecker] Filter input found.")
+
+            print(f"[BrowserChecker] Filling filter with: '{filter_query}'...")
             filter_input.fill(filter_query)
+            print(f"[BrowserChecker] Filter filled.")
+
+            print(f"[BrowserChecker] Pressing Enter on filter...")
             filter_input.press("Enter")
+            print(f"[BrowserChecker] Enter pressed.")
 
             # Wait for the results to potentially update. We need to wait for either:
             # 1. Issue rows to appear (meaning matches found)
             # 2. The "No results" message to appear
             # 3. A timeout (assume no results or error)
-            print("[BrowserChecker] Waiting for issue results to load...")
+            results_selector = f"{self._ISSUE_ROW_SELECTOR}, {self._NO_RESULTS_SELECTOR}"
+            print(f"[BrowserChecker] Waiting for results selector '{results_selector}'...")
             try:
                 # Wait for either issue rows OR the no results blankslate
                 page.wait_for_selector(
-                    f"{self._ISSUE_ROW_SELECTOR}, {self._NO_RESULTS_SELECTOR}",
-                    state="visible",
-                    timeout=self.timeout
+                    results_selector,
+                    state="attached", # Try 'attached' instead of 'visible' initially
+                    timeout=self.timeout # Use the increased timeout
                 )
+                print(f"[BrowserChecker] Results selector found.")
 
                 # Check if any issue rows are present *after* waiting
+                print(f"[BrowserChecker] Counting issue rows ('{self._ISSUE_ROW_SELECTOR}')...")
                 issue_rows = page.locator(self._ISSUE_ROW_SELECTOR)
-                if issue_rows.count() > 0:
-                    print(f"[BrowserChecker] Found {issue_rows.count()} issue row(s) matching filter.")
+                count = issue_rows.count() # Get count once
+                if count > 0:
+                    print(f"[BrowserChecker] Found {count} issue row(s) matching filter.")
                     found_issue = True
                 else:
                     # Check if the "no results" message is visible
+                    print(f"[BrowserChecker] No issue rows found. Checking for 'no results' message ('{self._NO_RESULTS_SELECTOR}')...")
                     no_results_element = page.locator(self._NO_RESULTS_SELECTOR)
-                    if no_results_element.is_visible():
-                         print("[BrowserChecker] 'No results' message found.")
+                    if no_results_element.is_visible(): # Check visibility here
+                         print("[BrowserChecker] 'No results' message is visible.")
                     else:
                          # This case is unlikely if the wait_for_selector worked, but possible
-                         print("[yellow][BrowserChecker] Timed out or failed to find issue rows or 'no results' message definitively.")
+                         print("[yellow][BrowserChecker] Results selector found, but neither issue rows nor 'no results' message were definitively identified.")
                     found_issue = False
 
             except PlaywrightTimeoutError:
