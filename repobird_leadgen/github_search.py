@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 from typing import (
     Iterator,
@@ -11,6 +12,8 @@ from typing import (
 import random  # For jitter
 from github import Github, Auth
 from github.Repository import Repository
+from github.Issue import Issue
+from github.TimelineEvent import TimelineEvent
 from tqdm import tqdm
 from .config import GITHUB_TOKEN, CACHE_DIR  # Added CACHE_DIR
 from datetime import datetime, timedelta, timezone
@@ -32,8 +35,8 @@ _REPO_QUERY_TEMPLATE = (
 
 class GitHubSearcher:
     """
-    Searches GitHub for repositories using the API and optionally checks for
-    issue labels using either the API or a browser-based checker.
+    Searches GitHub for repositories using the API, filters by issue criteria
+    (label, age, linked PRs), and optionally checks labels using a browser.
     """
 
     def __init__(self, token: str | None = None, use_browser_checker: bool = False):
@@ -51,26 +54,26 @@ class GitHubSearcher:
             )
 
         auth = Auth.Token(token or GITHUB_TOKEN)
-        self.gh = Github(auth=auth, per_page=100, retry=5, timeout=15)
+        # Increased timeout for potentially longer issue/timeline calls
+        self.gh = Github(auth=auth, per_page=100, retry=5, timeout=30)
         self.use_browser_checker = use_browser_checker
-        # Initialize checker later, only if needed, within a context manager
         self._browser_checker_instance: Optional[BrowserIssueChecker] = None
 
-        # --- Issue Label Cache ---
+        # Issue Label Cache (stores basic label existence check result)
         self.issue_cache_path = Path(CACHE_DIR) / "issue_label_cache.jsonl"
+        # Cache stores: (repo_full_name, label) -> (has_label_bool, list_of_basic_issue_details)
         self.issue_cache: Dict[
             Tuple[str, str],
-            Tuple[bool, List[Dict[str, Any]]],  # Store flag and issue details list
-        ] = {}  # Key: (repo_full_name, label), Value: (has_label, [issue_details])
+            Tuple[bool, List[Dict[str, Any]]],
+        ] = {}
         self._load_issue_cache()
-        # --- End Issue Label Cache ---
 
         print(
             f"[GitHubSearcher] Initialized. Using Browser Checker: {self.use_browser_checker}. Issue cache loaded with {len(self.issue_cache)} entries."
         )
 
     def _load_issue_cache(self):
-        """Loads the issue label check results from the cache file."""
+        """Loads the basic issue label check results from the cache file."""
         if not self.issue_cache_path.exists():
             print(
                 f"[GitHubSearcher] Issue cache file not found: {self.issue_cache_path}. Starting fresh."
@@ -87,16 +90,16 @@ class GitHubSearcher:
                         continue
                     try:
                         data = json.loads(line)
-                        # Basic validation - could add timestamp check later
-                        # Load issue details, default to empty list if missing
                         if "repo" in data and "label" in data and "has_label" in data:
-                            # Use the new key 'issue_details'
-                            issue_details = data.get(
-                                "issue_details", []
-                            )  # Default to []
+                            # Ensure issue_details is always a list, default to empty if missing
+                            issue_details = data.get("issue_details", [])
+                            if not isinstance(issue_details, list):
+                                print(f"[yellow]Warning: Invalid 'issue_details' format in cache for {data['repo']}, resetting to [].")
+                                issue_details = []
+
                             self.issue_cache[(data["repo"], data["label"])] = (
                                 data["has_label"],
-                                issue_details,  # Store the list of dicts
+                                issue_details,
                             )
                             count += 1
                         else:
@@ -110,7 +113,6 @@ class GitHubSearcher:
             print(f"[GitHubSearcher] Loaded {count} entries into issue cache.")
         except Exception as e:
             print(f"[red]Error loading issue cache file {self.issue_cache_path}: {e}")
-            # Decide whether to proceed with an empty cache or raise error
             self.issue_cache = {}  # Start fresh if loading fails
 
     def _append_to_issue_cache(
@@ -118,19 +120,17 @@ class GitHubSearcher:
         repo_full_name: str,
         label: str,
         has_label: bool,
-        issue_details: List[Dict[str, Any]],  # Changed from issue_numbers
+        issue_details: List[Dict[str, Any]],
         html_url: str,
     ):
-        """Appends a new result (including html_url and issue details) to the issue label cache file."""
+        """Appends a basic label check result to the issue label cache file."""
         try:
-            # Ensure cache directory exists
             self.issue_cache_path.parent.mkdir(parents=True, exist_ok=True)
-
             entry = {
                 "repo": repo_full_name,
                 "label": label,
                 "has_label": has_label,
-                "issue_details": issue_details,  # Use new key and store details list
+                "issue_details": issue_details,
                 "html_url": html_url,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -145,7 +145,7 @@ class GitHubSearcher:
     def _build_repo_query(
         self, *, language: str, min_stars: int, recent_days: int
     ) -> str:
-        """Builds the query for the initial repository search (without label)."""
+        """Builds the query for the initial repository search."""
         pushed_after_date = datetime.now(timezone.utc) - timedelta(days=recent_days)
         pushed_after_str = pushed_after_date.strftime("%Y-%m-%d")
         return _REPO_QUERY_TEMPLATE.format(
@@ -154,147 +154,287 @@ class GitHubSearcher:
             pushed_after=pushed_after_str,
         )
 
-    def _has_open_issue_with_label(self, repo: Repository, label: str) -> bool:
-        """Checks if a repository has at least one open issue with the given label."""
-        # Quote the label if it contains spaces
+    def _has_open_issue_with_label_api(self, repo: Repository, label: str) -> bool:
+        """API check: Does the repo have *any* open issue with the label?"""
         safe_label = f'"{label}"' if " " in label else label
         issue_query = f"repo:{repo.full_name} is:issue is:open label:{safe_label}"
         try:
-            # Search for just one issue to confirm existence
-            issues = self.gh.search_issues(query=issue_query)
+            # Use execute_with_retry for the search call itself
+            issues = self._execute_with_retry(
+                self.gh.search_issues, query=issue_query
+            )
             return issues.totalCount > 0
-        except RateLimitExceededException:
-            print(f"Rate limit hit checking issues for {repo.full_name}. Waiting...")
-            self._wait_for_rate_limit_reset("core")  # Check 'core' limit for issues
-            # Retry after waiting
-            try:
-                issues = self.gh.search_issues(query=issue_query)
-                return issues.totalCount > 0
-            except RateLimitExceededException:
-                print(
-                    f"Rate limit hit again after waiting for {repo.full_name}. Skipping repo."
-                )
-                return False
-            except GithubException as ge_retry:
-                print(
-                    f"GitHub error checking issues for {repo.full_name} after retry: {ge_retry}. Skipping."
-                )
-                return False
+        except RuntimeError as e:
+            # Catch failure after retries from _execute_with_retry
+            print(
+                f"[yellow]Warning: API check for label '{label}' on {repo.full_name} failed after retries: {e}. Assuming false."
+            )
+            return False
         except GithubException as ge:
-            # Handle potential 422 errors if the query is complex or repo is weird
-            print(f"GitHub error checking issues for {repo.full_name}: {ge}. Skipping.")
+            print(
+                f"[yellow]Warning: GitHub error during API label check for {repo.full_name}: {ge}. Assuming false."
+            )
             return False
         except Exception as e:
             print(
-                f"Unexpected error checking issues for {repo.full_name}: {e}. Skipping."
+                f"[yellow]Warning: Unexpected error during API label check for {repo.full_name}: {e}. Assuming false."
             )
             return False
+
+    # --- New Helper Methods --- START
+    def _get_linked_prs_count(self, issue: Issue) -> int:
+        """Counts linked PRs for an issue using the timeline API."""
+        count = 0
+        try:
+            # Wrap the timeline fetching in retry logic
+            timeline = self._execute_with_retry(issue.get_timeline)
+            if not timeline:
+                print(f"  [!] Failed to get timeline for issue #{issue.number} after retries.")
+                return -1 # Indicate error
+
+            for event in timeline:
+                # Check event type and cross-referenced source
+                if (
+                    event.event == "cross-referenced"
+                    and event.source
+                    and hasattr(event.source, "issue")
+                    and hasattr(event.source.issue, "pull_request")
+                    and event.source.issue.pull_request is not None
+                ):
+                    count += 1
+            return count
+        except RuntimeError as e:
+            print(
+                f"[yellow]Warning: Timeline fetch for issue {issue.number} in repo {issue.repository.full_name} failed after retries: {e}. Cannot count PRs."
+            )
+            return -1  # Indicate error
+        except GithubException as ge:
+            print(
+                f"[yellow]Warning: GitHub error fetching timeline for issue {issue.number} in repo {issue.repository.full_name}: {ge}. Cannot count PRs."
+            )
+            return -1
+        except Exception as e:
+            print(
+                f"[yellow]Warning: Unexpected error fetching timeline for issue {issue.number} in repo {issue.repository.full_name}: {e}. Cannot count PRs."
+            )
+            return -1
+
+    def _find_qualifying_issues(
+        self,
+        repo: Repository,
+        label: str,
+        max_issue_age_days: Optional[int],
+        max_linked_prs: Optional[int],
+    ) -> bool:
+        """
+        Fetches open issues with the label and checks if *any* satisfy the age/PR criteria.
+        Returns True if at least one qualifying issue is found, False otherwise.
+        """
+        try:
+            print(
+                f"  Performing detailed check: Repo {repo.full_name}, Label '{label}', Max Age: {max_issue_age_days}, Max PRs: {max_linked_prs}"
+            )
+            # Fetch issues with the label using the API (wrapped in retry)
+            issues_paginator = self._execute_with_retry(
+                repo.get_issues, state="open", labels=[label]
+            )
+
+            if not issues_paginator:
+                print(f"  [!] Failed to fetch issues for {repo.full_name} after retries.")
+                return False
+
+            # Calculate age threshold if needed
+            age_threshold = None
+            if max_issue_age_days is not None:
+                age_threshold = datetime.now(timezone.utc) - timedelta(
+                    days=max_issue_age_days
+                )
+
+            # Iterate through issues, checking criteria
+            # Limit iteration to avoid excessive API calls if many issues exist
+            issues_checked = 0
+            max_issues_to_check = 30 # Configurable? Maybe later.
+            for issue in issues_paginator:
+                issues_checked += 1
+                if issues_checked > max_issues_to_check:
+                    print(
+                        f"  Checked {max_issues_to_check} issues for {repo.full_name}, none qualified so far. Stopping detailed check."
+                    )
+                    break # Stop checking after a limit
+
+                print(f"    Checking issue #{issue.number} '{issue.title[:50]}...'")
+
+                # 1. Check Age
+                if age_threshold:
+                    # Ensure issue.created_at is timezone-aware (it should be from PyGithub)
+                    created_at_aware = issue.created_at
+                    if created_at_aware.tzinfo is None:
+                         # Should not happen with PyGithub, but handle defensively
+                         created_at_aware = created_at_aware.replace(tzinfo=timezone.utc)
+
+                    if created_at_aware < age_threshold:
+                        print(f"      Issue #{issue.number} is too old (created {created_at_aware.date()}). Skipping.")
+                        continue  # Skip to next issue
+
+                # 2. Check Linked PRs (only if age is okay or not checked)
+                if max_linked_prs is not None:
+                    print(f"      Checking linked PRs for issue #{issue.number}...")
+                    pr_count = self._get_linked_prs_count(issue)
+                    if pr_count == -1:
+                        print(
+                            f"      [!] Failed to get PR count for issue #{issue.number}. Skipping issue."
+                        )
+                        continue # Skip issue if PR count failed
+                    if pr_count > max_linked_prs:
+                        print(
+                            f"      Issue #{issue.number} has too many linked PRs ({pr_count} > {max_linked_prs}). Skipping."
+                        )
+                        continue  # Skip to next issue
+                    else:
+                        print(f"      Issue #{issue.number} has {pr_count} linked PRs (<= {max_linked_prs}). OK.")
+
+                # If we reach here, the issue satisfies all active criteria
+                print(f"      [+] Issue #{issue.number} qualifies!")
+                return True  # Found at least one qualifying issue
+
+            # If loop finishes without returning True, no qualifying issues were found
+            print(
+                f"  No qualifying issues found among the first {issues_checked} checked for {repo.full_name} with label '{label}'."
+            )
+            return False
+
+        except RuntimeError as e:
+            print(
+                f"[red]Error during detailed issue check for {repo.full_name} after retries: {e}"
+            )
+            return False
+        except GithubException as ge:
+            print(
+                f"[red]GitHub error during detailed issue check for {repo.full_name}: {ge}"
+            )
+            return False
+        except Exception as e:
+            print(
+                f"[red]Unexpected error during detailed issue check for {repo.full_name}: {e}"
+            )
+            return False
+    # --- New Helper Methods --- END
 
     def _wait_for_rate_limit_reset(
         self,
         limit_type: str = "search",
         exception: Optional[RateLimitExceededException] = None,
     ):
-        """
-        Waits until the GitHub API rate limit is reset, prioritizing Retry-After header.
-        """
-        wait_seconds = 60  # Default wait if everything else fails
+        """Waits until the GitHub API rate limit is reset."""
+        wait_seconds = 60  # Default
+        reset_time_str = "unknown"
+        remaining_str = "unknown"
+        limit_str = "unknown"
 
-        # 1. Check Retry-After header (often present for secondary limits)
+        # 1. Retry-After Header
         if exception and "Retry-After" in exception.headers:
             try:
-                wait_seconds = int(exception.headers["Retry-After"]) + 5  # Add buffer
+                wait_seconds = int(exception.headers["Retry-After"]) + 5
                 print(f"Using Retry-After header: waiting {wait_seconds:.0f} seconds.")
                 time.sleep(wait_seconds)
                 return
             except (ValueError, TypeError):
                 print("Could not parse Retry-After header.")
 
-        # 2. Check primary rate limit reset time
+        # 2. Primary Rate Limit Info
         try:
             limits = self.gh.get_rate_limit()
-            if limit_type == "search":
-                limit_data = limits.search
-            elif limit_type == "core":
-                limit_data = limits.core  # Issues search uses core limit
-            else:
-                print(f"Unknown rate limit type '{limit_type}'. Checking search limit.")
-                limit_data = limits.search
+            limit_map = {"search": limits.search, "core": limits.core}
+            # Add other limits if needed (graphql, integration_manifest, code_scanning_upload)
+            limit_data = limit_map.get(limit_type)
 
-            reset_time_utc = limit_data.reset.replace(tzinfo=timezone.utc)
-            now_utc = datetime.now(timezone.utc)
-            calculated_wait = (
-                reset_time_utc - now_utc
-            ).total_seconds() + 5  # Add buffer
+            if limit_data:
+                reset_time_utc = limit_data.reset.replace(tzinfo=timezone.utc)
+                now_utc = datetime.now(timezone.utc)
+                calculated_wait = (reset_time_utc - now_utc).total_seconds() + 5
+                reset_time_str = reset_time_utc.isoformat()
+                remaining_str = str(limit_data.remaining)
+                limit_str = str(limit_data.limit)
 
-            if calculated_wait > 0:
-                wait_seconds = calculated_wait
-                print(
-                    f"Waiting {wait_seconds:.0f} seconds until primary '{limit_type}' rate limit reset ({limit_data.remaining}/{limit_data.limit})."
-                )
-                time.sleep(wait_seconds)
-                return
+                if calculated_wait > 0:
+                    wait_seconds = calculated_wait
+                else:
+                    # Limit should be reset, but add safety delay
+                    wait_seconds = 5
+                    print(f"Primary '{limit_type}' limit should be reset. Waiting safety {wait_seconds}s.")
+
             else:
-                print(
-                    f"Primary '{limit_type}' rate limit should be reset. Proceeding cautiously."
-                )
-                # Even if reset, add a small delay for safety, especially if Retry-After wasn't present
-                time.sleep(5)
-                return
+                print(f"Unknown rate limit type '{limit_type}'. Using default wait.")
+                wait_seconds = 60 # Fallback
 
         except Exception as e:
             print(f"Error getting rate limit details: {e}. Falling back to 60s wait.")
-            time.sleep(wait_seconds)  # Use the fallback wait
+            wait_seconds = 60 # Fallback
+
+        print(
+            f"Waiting {wait_seconds:.0f} seconds for '{limit_type}' limit (Reset: {reset_time_str}, Remaining: {remaining_str}/{limit_str})."
+        )
+        time.sleep(wait_seconds)
 
     def _execute_with_retry(self, func, *args, **kwargs):
         """Executes a function with exponential backoff for specific GitHub errors."""
         max_retries = 5
-        base_delay = 2  # seconds
+        base_delay = 3 # Increased base delay slightly
         for attempt in range(max_retries):
             try:
                 return func(*args, **kwargs)
             except RateLimitExceededException as rle:
-                limit_type = "search" if "search" in str(func) else "core"
+                # Determine limit type based on function name or common patterns
+                func_name = func.__name__
+                limit_type = "core" # Default to core, most API calls use this
+                if "search" in func_name:
+                    limit_type = "search"
+                elif "get_timeline" in func_name:
+                    limit_type = "core"
+                elif "get_issues" in func_name:
+                    limit_type = "core"
+
                 print(
-                    f"\nRate limit hit (attempt {attempt + 1}/{max_retries}). Waiting..."
+                    f"\nRate limit hit ({limit_type}, attempt {attempt + 1}/{max_retries}). Waiting..."
                 )
                 self._wait_for_rate_limit_reset(limit_type, exception=rle)
-                # Continue to next attempt after waiting
-            except (
-                GithubException
-            ) as ge:  # Catch other potentially transient errors like 5xx
-                # Check if it's a server error (5xx) which might be transient
+            except GithubException as ge:
                 if hasattr(ge, "status") and ge.status >= 500:
-                    delay = (base_delay**attempt) + random.uniform(
-                        0, 1
-                    )  # Exponential backoff with jitter
+                    delay = (base_delay**attempt) + random.uniform(0, 1)
                     print(
                         f"\nGitHub API server error (Status {ge.status}, attempt {attempt + 1}/{max_retries}): {ge.data.get('message', 'No message')}. Retrying in {delay:.2f}s..."
                     )
                     time.sleep(delay)
+                elif hasattr(ge, "status") and ge.status == 403 and "secondary rate limit" in str(ge.data).lower():
+                     # Handle secondary rate limits (often lack Retry-After)
+                    delay = (base_delay**(attempt + 1)) + random.uniform(0, 5) # Longer, more random delay for secondary
+                    print(
+                        f"\nGitHub API secondary rate limit detected (attempt {attempt + 1}/{max_retries}). Retrying aggressively in {delay:.2f}s..."
+                    )
+                    time.sleep(delay)
+                # Handle 404 Not Found gracefully for specific operations if needed
+                elif hasattr(ge, "status") and ge.status == 404 and func.__name__ in ["get_issues", "get_timeline"]:
+                    print(f"\nResource not found (404) for {func.__name__}. Returning None.")
+                    return None # Allow flow to continue if a resource isn't found
                 else:
-                    # Non-retryable GitHub error (e.g., 404, 403)
                     print(f"\nNon-retryable GitHub error encountered: {ge}")
-                    raise  # Re-raise the original exception
+                    raise # Re-raise other GithubExceptions
             except Exception as e:
-                # Catch-all for other unexpected errors during the API call
+                # Catch other exceptions like connection errors etc.
                 print(
                     f"\nUnexpected error during API call (attempt {attempt + 1}/{max_retries}): {e}"
                 )
-                # Depending on the error, you might want to retry or raise immediately
-                # For now, let's retry for unexpected errors too, but log clearly
                 if attempt < max_retries - 1:
                     delay = (base_delay**attempt) + random.uniform(0, 1)
                     print(f"Retrying in {delay:.2f}s...")
                     time.sleep(delay)
                 else:
                     print("Max retries reached for unexpected error.")
-                    raise  # Re-raise after max retries
+                    raise # Re-raise after max retries
 
         print(
             f"\nMax retries ({max_retries}) exceeded for function {func.__name__}. Aborting operation."
         )
-        # Raise a specific error or return None/empty to indicate failure
         raise RuntimeError(
             f"Failed to execute {func.__name__} after {max_retries} retries due to persistent API errors."
         )
@@ -302,46 +442,68 @@ class GitHubSearcher:
     def search(
         self,
         *,
-        label: str,  # Label is now used for filtering, not initial search
+        label: str,
         language: str = "python",
         min_stars: int = 20,
         recent_days: int = 365,
-        max_results: int = 50,  # Target number of *newly qualified* repos to find
-        cache_file: Path,  # Pass cache file path for incremental writing
-        existing_repo_names: Optional[Set[str]] = None,  # Added set of existing names
+        max_results: int = 50,
+        max_issue_age_days: Optional[int] = None, # New filter
+        max_linked_prs: Optional[int] = None,     # New filter
+        cache_file: Path,
+        existing_repo_names: Optional[Set[str]] = None,
     ) -> Iterator[Repository]:
         """
-        Searches repositories, filters by open issue label, skipping already cached repos,
+        Searches repositories, filters by label, issue age, linked PRs, skipping cached repos,
         yields newly qualified repos, and saves them incrementally to the cache file.
-        and saves them incrementally to the cache file (JSONL format).
         Handles rate limits with backoff and retry.
+
+        Args:
+            label: Issue label to filter for.
+            language: Programming language filter.
+            min_stars: Minimum stars for repository.
+            recent_days: Minimum recency of pushes (days).
+            max_results: Maximum number of qualified repositories to yield.
+            max_issue_age_days: Optional. Max age of qualifying issues in days.
+            max_linked_prs: Optional. Max number of linked PRs for qualifying issues.
+            cache_file: Path to the output cache file storing qualified repo data (JSONL).
+            existing_repo_names: Optional set of repo names already in the cache file to skip.
+
+        Yields:
+            Qualified Repository objects.
         """
         repo_query = self._build_repo_query(
             language=language, min_stars=min_stars, recent_days=recent_days
         )
         print(f"Searching GitHub repositories with query: {repo_query}")
         print(f"Filtering for repos with open issues labeled: '{label}'")
+        if max_issue_age_days is not None:
+            print(f"  Applying Max Issue Age filter: {max_issue_age_days} days")
+        if max_linked_prs is not None:
+            print(f"  Applying Max Linked PRs filter: {max_linked_prs}")
         print(f"Saving results incrementally to: {cache_file}")
         if self.use_browser_checker:
-            print("[yellow]Using Browser Checker for issue labels (will be slower).[/]")
+            print("[yellow]Using Browser Checker for initial label check (ignored if detailed filters active).[/]")
 
         found_count = 0
         processed_repo_count = 0
-        skipped_cached_count = 0  # Initialize counter for skipped cached repos
+        skipped_cached_count = 0
+        detailed_check_count = 0 # Count how many repos needed the deeper check
 
-        # Ensure cache directory exists
+        # Determine if detailed filtering is active
+        detailed_filters_active = (
+            max_issue_age_days is not None or max_linked_prs is not None
+        )
+
         cache_file.parent.mkdir(parents=True, exist_ok=True)
-
-        # Determine which checker function to use
-        # We need to handle the browser checker's setup/teardown lifecycle
-        checker_context = BrowserIssueChecker() if self.use_browser_checker else None
+        # Only initialize browser checker if needed and not overridden by detailed filters
+        checker_context = None
+        if self.use_browser_checker and not detailed_filters_active:
+            checker_context = BrowserIssueChecker()
 
         try:
-            # Start browser checker context if needed
             if checker_context:
-                checker_context.__enter__()  # Manually enter context
+                checker_context.__enter__()
 
-            # Initial search for repositories - wrap in retry logic
             paginated_list = self._execute_with_retry(
                 self.gh.search_repositories,
                 query=repo_query,
@@ -349,22 +511,19 @@ class GitHubSearcher:
                 order="desc",
             )
 
-            if (
-                not paginated_list
-            ):  # Handle case where initial search fails after retries
+            if not paginated_list:
                 print("[red]Initial repository search failed after multiple retries.")
-                return  # Yield nothing
+                return
 
             print(
                 f"Found {paginated_list.totalCount} potential repos matching base criteria."
             )
             print(
-                f"Checking them for open '{label}' issues until {max_results} are found..."
+                f"Checking them for qualifying '{label}' issues until {max_results} are found..."
             )
 
             repo_iterator = iter(paginated_list)
 
-            # Open cache file for appending JSON Lines
             with (
                 cache_file.open("a", encoding="utf-8") as f_cache,
                 tqdm(
@@ -373,212 +532,173 @@ class GitHubSearcher:
             ):
                 while found_count < max_results:
                     try:
-                        # Get next repo from iterator with retry for iterator errors
                         repo = self._execute_with_retry(next, repo_iterator)
                         processed_repo_count += 1
-                        repo_full_name = repo.full_name  # Get once
+                        repo_full_name = repo.full_name
+                        pbar.set_postfix_str(f"Checking {repo_full_name}...", refresh=True)
 
-                        # --- Skip if already in the main cache file ---
-                        if (
-                            existing_repo_names
-                            and repo_full_name in existing_repo_names
-                        ):
-                            # print(f"  Skipping {repo_full_name} (already in main cache: {cache_file.name})")
-                            pbar.set_postfix_str(
-                                "Skipping cached", refresh=False
-                            )  # Update progress bar status
-                            skipped_cached_count += 1  # Increment the counter
-                            continue  # Skip to the next repo from GitHub search
+                        # --- Skip if already in the main output cache file ---
+                        if existing_repo_names and repo_full_name in existing_repo_names:
+                            pbar.set_postfix_str("Skipping cached", refresh=False)
+                            skipped_cached_count += 1
+                            continue
 
-                        # --- Check Issue Label Cache (secondary cache) ---
-                        cache_key = (repo_full_name, label)
-                        if cache_key in self.issue_cache:
-                            # Unpack has_label and the list of issue details
-                            has_label, issue_details_cache = self.issue_cache[cache_key]
-                            print(
-                                f"  [Cache Hit] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label}, Issues: {[d.get('number', '?') for d in issue_details_cache]}"  # Show numbers from details
+                        # --- Qualification Logic --- START
+                        repo_qualifies = False
+                        issue_details_for_output: List[Dict[str, Any]] = [] # Store basic details if repo qualifies
+
+                        if detailed_filters_active:
+                            # --- Detailed Filter Path --- MUST fetch issues
+                            pbar.set_postfix_str(f"Detailed check {repo_full_name}", refresh=True)
+                            detailed_check_count += 1
+                            repo_qualifies = self._find_qualifying_issues(
+                                repo,
+                                label,
+                                max_issue_age_days,
+                                max_linked_prs
                             )
-                            # Skip API/Browser check if cache hit
-                            pbar.set_postfix_str(
-                                f"Checking {repo_full_name}...", refresh=True
-                            )  # Update progress bar status
-                        else:
-                            # --- Cache Miss - Choose Checking Method ---
-                            # print(f"  [Cache Miss] Checking Repo: {repo_full_name}, Label: '{label}'...") # Can be verbose
-                            pbar.set_postfix_str(
-                                f"Checking {repo_full_name}...", refresh=True
-                            )  # Update progress bar status
-                            # Result will be a tuple: (bool, List[Dict[str, Any]]) or None if check fails
-                            check_result: Optional[
-                                Tuple[bool, List[Dict[str, Any]]]
-                            ] = None
-                            issue_details_check: List[
-                                Dict[str, Any]
-                            ] = []  # Store details from check
+                            # Note: We don't use or update the `issue_cache` here, as it only
+                            # stores basic label existence, not the detailed filter result.
+                            # We also don't get `issue_details_for_output` from this path currently.
 
-                            if self.use_browser_checker and checker_context:
-                                # Use Browser Checker
-                                try:
-                                    # Browser checker now returns a tuple
-                                    check_result = (
-                                        checker_context.check_repo_for_issue_label(
+                        else:
+                            # --- Basic Filter Path --- Check label existence only (using cache/API/browser)
+                            cache_key = (repo_full_name, label)
+                            has_label_initially = False
+
+                            if cache_key in self.issue_cache:
+                                # Use cached basic label existence result
+                                has_label_initially, issue_details_for_output = self.issue_cache[cache_key]
+                                print(
+                                    f"  [Cache Hit] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label_initially}"
+                                )
+                            else:
+                                # Cache Miss - Perform live basic label check
+                                print(
+                                    f"  [Cache Miss] Checking {repo_full_name} for '{label}'..."
+                                )
+                                check_result: Optional[Tuple[bool, List[Dict[str, Any]]]] = None
+
+                                if self.use_browser_checker and checker_context:
+                                    try:
+                                        check_result = checker_context.check_repo_for_issue_label(
                                             repo_full_name, label
                                         )
-                                    )
-                                except Exception as browser_err:
-                                    # Catch errors from the browser check itself
-                                    print(
-                                        f"[red]Error during browser check for {repo_full_name}: {browser_err}. Skipping repo."
-                                    )
-                                    continue  # Skip to next repo
-                            else:
-                                # Use API Checker (with retry)
-                                try:
-                                    # API check only returns boolean
-                                    api_has_label_result = self._execute_with_retry(
-                                        self._has_open_issue_with_label, repo, label
-                                    )
-                                    # Simulate the tuple structure for consistency (empty details list)
-                                    check_result = (api_has_label_result, [])
-                                except RuntimeError as api_retry_err:
-                                    # Catch failure after retries from API check
-                                    print(
-                                        f"[red]API check failed for {repo_full_name} after retries: {api_retry_err}. Skipping repo."
-                                    )
-                                    continue  # Skip to next repo
-                                except GithubException as ghe:
-                                    print(
-                                        f"[red]GitHub API error during label check for {repo_full_name}: {ghe}. Skipping repo."
-                                    )
-                                    continue  # Skip to next repo
+                                    except Exception as browser_err:
+                                        print(
+                                            f"[red]Error during browser check for {repo_full_name}: {browser_err}. Skipping repo."
+                                        )
+                                        continue # Skip to next repo
+                                else:
+                                    # API check (returns only boolean)
+                                    try:
+                                        api_has_label = self._has_open_issue_with_label_api(repo, label)
+                                        check_result = (api_has_label, []) # Simulate tuple, no details from API check
+                                    except Exception as api_err:
+                                        print(
+                                            f"[red]Error during API label check for {repo_full_name}: {api_err}. Skipping repo."
+                                        )
+                                        continue # Skip to next repo
 
-                            # --- Update Cache if check was successful ---
-                            if check_result is not None:
-                                has_label, issue_details_check = (
-                                    check_result  # Unpack result
-                                )
-                                self.issue_cache[cache_key] = (
-                                    has_label,
-                                    issue_details_check,
-                                )  # Store tuple
-                                self._append_to_issue_cache(
-                                    repo_full_name,
-                                    label,
-                                    has_label,
-                                    issue_details_check,  # Pass details list
-                                    repo.html_url,
-                                )
-                                print(
-                                    f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label}, Issues: {[d.get('number', '?') for d in issue_details_check]}. Cached."
-                                )
-                            else:
-                                # Check failed (API or Browser), skip this repo for qualification
-                                print(
-                                    f"  [Check Failed] Skipping qualification for {repo_full_name} due to check error."
-                                )
-                                continue  # Go to next repo in the main loop
+                                # Update cache with the result of the live check
+                                if check_result is not None:
+                                    has_label_initially, issue_details_from_check = check_result
+                                    # Store result in memory cache
+                                    self.issue_cache[cache_key] = (has_label_initially, issue_details_from_check)
+                                    # Append result to file cache
+                                    self._append_to_issue_cache(
+                                        repo_full_name,
+                                        label,
+                                        has_label_initially,
+                                        issue_details_from_check,
+                                        repo.html_url,
+                                    )
+                                    issue_details_for_output = issue_details_from_check # Use details from check
+                                    print(
+                                        f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label_initially}. Cached."
+                                    )
+                                else:
+                                    # Check failed, cannot determine label presence
+                                    print(f"  [Check Failed] Skipping {repo_full_name}.")
+                                    continue # Skip to next repo
 
-                        # --- Process Qualification ---
-                        # REMOVE the first redundant 'if has_label:' block entirely.
-                        # The check below handles everything correctly based on the 'has_label'
-                        # value determined from the cache or the check result.
+                            # Qualify based on the initial check result
+                            repo_qualifies = has_label_initially
+                        # --- Qualification Logic --- END
 
-                        # This is the correct place to check the final 'has_label' value
-                        # (whether from cache or from a successful check)
-                        if has_label:
-                            found_count += 1  # Increment count only ONCE here
+                        # --- Process Qualified Repo ---
+                        if repo_qualifies:
+                            found_count += 1
                             pbar.update(1)
-                            pbar.set_postfix_str(
-                                "Found qualified", refresh=False
-                            )  # Update progress bar status
-                            # Print details immediately
+                            pbar.set_postfix_str("Found qualified", refresh=False)
                             print(f"\n  [+] Qualified: {repo.full_name}")
                             print(f"      URL: {repo.html_url}")
                             print(f"      ({found_count}/{max_results})")
 
-                            # Determine which issue details list to use (cache or check result)
-                            details_to_save = []
-                            if cache_key in self.issue_cache:
-                                _, details_to_save = self.issue_cache[
-                                    cache_key
-                                ]  # Use cached details
-                            elif check_result is not None:
-                                _, details_to_save = (
-                                    check_result  # Use details from the check
-                                )
+                            # Save raw data to the main cache file
+                            # Add the basic issue details found during the initial check (if available)
+                            repo.raw_data["_repobird_found_issues_basic"] = issue_details_for_output
 
-                            # Add the found issue details to the raw data before saving
-                            # Use a new custom key
-                            repo.raw_data["_repobird_found_issues"] = details_to_save
-                            # Optionally remove the old key if migrating
-                            repo.raw_data.pop("_repobird_found_issue_numbers", None)
-
-                            # Write raw data (now including issue details) to cache file immediately
                             json.dump(repo.raw_data, f_cache)
-                            f_cache.write("\n")  # Newline for JSONL format
-                            f_cache.flush()  # Ensure it's written to disk
-
-                            yield repo  # Yield the qualified repo object
+                            f_cache.write("\n")
+                            f_cache.flush()
+                            yield repo
+                        else:
+                            # Failed qualification (either basic or detailed)
+                            reason = "failed detailed filter" if detailed_filters_active else "no matching label"
+                            pbar.set_postfix_str(f"Skipped ({reason})", refresh=False)
+                            if detailed_filters_active:
+                                print(f"  [-] Repo {repo_full_name} skipped (failed detailed age/PR filter).")
+                            # No need for else print, basic filter path prints its own messages
 
                     except StopIteration:
                         print("\nReached end of GitHub repository search results.")
-                        break  # Exit the while loop cleanly
+                        break
                     except (RuntimeError, GithubException, UnknownObjectException) as e:
-                        # Catch errors from retry logic or specific GitHub issues
-                        print(f"\n[yellow]Warning: Skipping repo due to error: {e}")
-                        # Decide if the error is fatal for the whole search
-                        if isinstance(e, GithubException) and e.status == 422:
-                            print(
-                                "[red]Stopping search due to persistent invalid query or data error (422)."
-                            )
+                        print(f"\n[yellow]Warning: Skipping repo {repo_full_name if 'repo' in locals() else '(unknown)'} due to error: {e}")
+                        if isinstance(e, GithubException) and hasattr(e, 'status') and e.status == 422:
+                            print("[red]Stopping search due to persistent invalid query (422).")
                             break
-                        continue  # Continue to the next repo if possible
+                        continue # Skip to next repo
                     except Exception as e:
-                        # Catch unexpected errors during the loop processing
-                        print(
-                            f"\n[red]Unexpected error processing repo stream: {e}. Skipping."
-                        )
-                        # Consider adding a delay or stopping based on error type
-                        continue
+                        import traceback
+                        print(f"\n[red]Unexpected error processing repo stream: {e}. Skipping.")
+                        traceback.print_exc() # Print stack trace for unexpected errors
+                        continue # Skip to next repo
 
-            if found_count < max_results:
+            # End of loop summary
+            pbar.close() # Ensure progress bar is closed cleanly
+            print(f"\nSearch loop finished. Processed: {processed_repo_count}, Found Qualified: {found_count}")
+            if skipped_cached_count > 0:
+                print(f"Skipped {skipped_cached_count} repositories already in main cache.")
+            if detailed_filters_active:
+                 print(f"Performed detailed age/PR check on {detailed_check_count} repositories.")
+
+            if found_count < max_results and processed_repo_count < paginated_list.totalCount:
+                 print(f"\nStopped after finding {found_count} qualified repositories (max_results reached).")
+            elif found_count < max_results:
                 print(
-                    f"\nWarning: Found only {found_count} repositories meeting all criteria after checking {processed_repo_count} candidates."
+                    f"\nWarning: Found only {found_count} qualified repositories after checking all {processed_repo_count} processed repos."
+                )
+            elif found_count == 0:
+                 print(
+                    f"\nNo repositories matching all criteria (including detailed filters if active) were found among {processed_repo_count} processed repos."
                 )
             else:
-                print(
-                    f"\nSuccessfully found and cached {found_count} repositories meeting all criteria."
-                )
-            # Report skipped count if any were skipped
-            if skipped_cached_count > 0:
-                print(
-                    f"Skipped {skipped_cached_count} repositories already present in the cache file."
-                )
+                print(f"\nSuccessfully found and cached {found_count} qualified repositories.")
+
 
         except RuntimeError as e:
-            # Catch failure from initial search retry wrapper
-            print(f"[red]Error during initial search setup: {e}")
-            # No need to return/yield anything, function ends
+            print(f"[red]Error during search operation: {e}")
         except GithubException as e:
-            # Catch non-retryable errors during initial search setup
-            print(f"[red]GitHub API error during initial search setup: {e}")
-            if e.status == 401:
+            print(f"[red]GitHub API error during search setup: {e}")
+            if hasattr(e, 'status') and e.status == 401:
                 raise RuntimeError("Bad GitHub credentials. Check GITHUB_TOKEN.") from e
-            # Other non-retryable errors caught here
         except Exception as e:
-            # Catch any other unexpected errors during setup
+            import traceback
             print(f"[red]An unexpected error occurred during search setup: {e}")
-            raise  # Re-raise critical setup errors
+            traceback.print_exc()
+            raise
         finally:
-            # Ensure browser checker is closed if it was used
             if checker_context:
-                checker_context.__exit__(None, None, None)  # Manually exit context
-
-    # These helper methods are less useful now search yields results,
-    # but can be kept for potential internal use or adapted if needed.
-    # They would need modification to handle the yielding nature of search().
-    # def good_first_issue_repos(self, **kwargs) -> Iterator[Repository]:
-    #     yield from self.search(label="good first issue", **kwargs)
-
-    # def help_wanted_repos(self, **kwargs) -> Iterator[Repository]:
-    #     yield from self.search(label="help wanted", **kwargs)
+                checker_context.__exit__(None, None, None)

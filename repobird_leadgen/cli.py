@@ -1,3 +1,4 @@
+
 import json
 import tempfile
 from pathlib import Path
@@ -195,6 +196,16 @@ def search(
         "-d",
         help="Repository must have been pushed to within this many days.",
     ),
+    max_issue_age_days: Optional[int] = typer.Option(
+        None,
+        "--max-issue-age-days",
+        help="Filter repositories to only include those with at least one open issue (matching the label) created within the last N days.",
+    ),
+    max_linked_prs: Optional[int] = typer.Option(
+        None,
+        "--max-linked-prs",
+        help="Filter repositories to only include those with at least one open issue (matching the label) linked to at most N pull requests.",
+    ),
     cache_file: Path = typer.Option(
         None,
         "--cache-file",
@@ -221,6 +232,10 @@ def search(
     print(f"  Target Results: {max_results}")
     print(f"  Min Stars: {min_stars}")
     print(f"  Pushed within: {recent_days} days")
+    if max_issue_age_days is not None:
+        print(f"  Max Issue Age: {max_issue_age_days} days")
+    if max_linked_prs is not None:
+        print(f"  Max Linked PRs: {max_linked_prs}")
 
     # Determine default cache file path if not provided
     if cache_file is None:
@@ -228,7 +243,6 @@ def search(
         cache_dir.mkdir(parents=True, exist_ok=True)
         safe_label = "".join(c if c.isalnum() else "_" for c in label)
         safe_lang = "".join(c if c.isalnum() else "_" for c in language)
-        # Generate unique run ID using timestamp
         # Generate filename based on parameters
         filename_parts = [
             "raw_repos",
@@ -237,6 +251,12 @@ def search(
             f"stars_{min_stars}",
             f"days_{recent_days}",
         ]
+        # Add new filter params to filename if they are used
+        if max_issue_age_days is not None:
+            filename_parts.append(f"age_{max_issue_age_days}")
+        if max_linked_prs is not None:
+            filename_parts.append(f"prs_{max_linked_prs}")
+
         cache_filename = "_".join(filename_parts) + ".jsonl"
         cache_file = cache_dir / cache_filename
         print(f"  Using parameter-based cache file: {cache_file}")
@@ -281,9 +301,6 @@ def search(
         print(f"Cache file {cache_file} not found. Starting fresh.")
     # --- End loading existing repo names ---
 
-    # We no longer delete the cache file, we append to it.
-    # The search function itself handles opening in append mode.
-
     newly_added_count = 0  # Changed from repo_count
     try:
         # Pass the flag to the constructor
@@ -297,6 +314,8 @@ def search(
             max_results=max_results,
             min_stars=min_stars,
             recent_days=recent_days,
+            max_issue_age_days=max_issue_age_days,  # Pass new arg
+            max_linked_prs=max_linked_prs,          # Pass new arg
             cache_file=cache_file,  # Pass the path for incremental writes
             existing_repo_names=existing_repo_names,  # Pass existing names
         ):
@@ -310,28 +329,28 @@ def search(
             )
             return cache_file  # Return path for chaining in 'full' command
         else:
-            print(
-                f"\n[yellow]Search complete. No *new* repositories matching the criteria were added to → {cache_file}"
-            )
-            # Still return the path if it exists, as enrich might still be useful
-            if cache_file.exists():
-                return cache_file
-            # Check if the file exists but is empty (search ran but found nothing)
-            if cache_file.exists() and cache_file.stat().st_size == 0:
+            # Check if the file exists and is non-empty (maybe it had old results)
+            if cache_file.exists() and cache_file.stat().st_size > 0:
+                print(
+                    f"\n[yellow]Search complete. No *new* repositories matching the criteria were added. Cache file → {cache_file} still contains previous results."
+                )
+                return cache_file # Return existing cache path
+            # Check if the file exists but is empty (search ran but found nothing new or old)
+            elif cache_file.exists() and cache_file.stat().st_size == 0:
                 print(
                     f"[yellow]No repositories found matching the criteria. Empty cache file created: {cache_file}"
                 )
+                return None # Indicate no usable results
             elif not cache_file.exists():
                 print(
                     "[red]Search process did not create a cache file, likely due to an early error."
                 )
-            else:  # File exists but might have partial data if interrupted badly
-                print(
-                    f"[yellow]Search completed, but no repositories met all criteria. Cache file may contain partial data if interrupted: {cache_file}"
-                )
-            # Don't return cache_file if no repos were successfully found and saved.
-            # This prevents 'enrich' from running on an empty/failed cache.
-            return None
+                return None # Indicate failure
+            else: # Should not happen given above checks, but just in case
+                 print(
+                    f"\n[yellow]Search complete. No *new* repositories matching the criteria were added to → {cache_file}"
+                 )
+                 return None # Indicate no usable results
 
     except RuntimeError as e:  # Catch config errors or retry failures
         print(f"[red]Error during search: {e}")
@@ -458,6 +477,17 @@ def full_pipeline(
     recent_days: int = typer.Option(
         365, "--recent-days", "-d", help="Pushed within days."
     ),
+    # Add new filter options here
+    max_issue_age_days: Optional[int] = typer.Option(
+        None,
+        "--max-issue-age-days",
+        help="Filter search: issues must be created within N days.",
+    ),
+    max_linked_prs: Optional[int] = typer.Option(
+        None,
+        "--max-linked-prs",
+        help="Filter search: issues must have at most N linked PRs.",
+    ),
     output_formats: List[str] = typer.Option(
         ["md", "jsonl"], "--format", "-f", help="Output format(s): md, jsonl, csv."
     ),
@@ -485,8 +515,11 @@ def full_pipeline(
     temp_cache_path = None  # Initialize
     try:
         # Use a temporary file for the cache between steps, ensuring .jsonl suffix
+        # Create in the default cache dir for better organization
+        cache_dir = Path(CACHE_DIR)
+        cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
-            mode="w", delete=False, suffix=".jsonl", prefix="repobird_cache_"
+            mode="w", delete=False, suffix=".jsonl", prefix="repobird_cache_", dir=cache_dir
         ) as tmp_file:
             temp_cache_path = Path(tmp_file.name)
 
@@ -501,6 +534,8 @@ def full_pipeline(
             max_results=max_results,
             min_stars=min_stars,
             recent_days=recent_days,
+            max_issue_age_days=max_issue_age_days, # Pass new arg
+            max_linked_prs=max_linked_prs,         # Pass new arg
             cache_file=temp_cache_path,  # Pass the temp path
             use_browser_checker=use_browser_checker,  # Pass the flag
         )
@@ -508,8 +543,9 @@ def full_pipeline(
         # Check if search succeeded and found results
         if actual_cache_path is None:
             # Search already printed messages about failure or no results
-            print("[yellow]Search step did not yield results. Skipping enrichment.")
+            print("[yellow]Search step did not yield usable results. Skipping enrichment.")
             raise typer.Exit()  # Exit cleanly
+        # Double check the file exists and is not empty before proceeding
         elif not actual_cache_path.exists() or actual_cache_path.stat().st_size == 0:
             print(
                 "[yellow]Search completed but cache file is missing or empty. Skipping enrichment."
@@ -535,7 +571,7 @@ def full_pipeline(
         traceback.print_exc()
         raise typer.Exit(code=1)
     finally:
-        # Clean up the temporary file if it was created
+        # Clean up the temporary file if it was created and still exists
         if temp_cache_path and temp_cache_path.exists():
             try:
                 temp_cache_path.unlink()
