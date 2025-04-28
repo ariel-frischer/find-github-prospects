@@ -38,3 +38,17 @@ filterwarnings = [
     "ignore::DeprecationWarning", # Example filter, add others if needed
 ]
 addopts = "-m 'not integration'"
+
+[tool.mypy]
+python_version = "3.9"
+# ignore_missing_imports = true # Removed in favor of installing type stubs
+# Alternatively, specify per-module ignores:
+# [[tool.mypy.overrides]]
+# module = [
+#     "dotenv",
+#     "playwright.*",
+#     "rich.*",
+#     "github.*",
+#     "tqdm", # Can ignore tqdm if types-tqdm isn't installed
+# ]
+# ignore_missing_imports = true

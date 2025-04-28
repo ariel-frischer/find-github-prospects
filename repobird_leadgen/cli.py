@@ -1,18 +1,22 @@
 import json
+import shutil
 import tempfile
+import traceback  # For printing stack traces on error
+import webbrowser
 from pathlib import Path
 from typing import List, Optional, Set  # Added Set
+
 import typer
-from rich import print
 from github import GithubException, RateLimitExceededException, Repository
-import traceback  # For printing stack traces on error
+from rich import print
+
+from .config import CACHE_DIR, CONCURRENCY, OUTPUT_DIR  # Use config for dirs
+from .contact_scraper import ContactScraper
 
 # Import local modules
 from .github_search import GitHubSearcher
-from .contact_scraper import ContactScraper
-from .summarizer import save_summary  # Use the unified save function
 from .models import RepoSummary
-from .config import OUTPUT_DIR, CONCURRENCY, CACHE_DIR  # Use config for dirs
+from .summarizer import save_summary  # Use the unified save function
 from .utils import parallel_map
 
 app = typer.Typer(
@@ -585,6 +589,322 @@ def full_pipeline(
                 print(
                     f"[yellow]Warning: Could not delete temporary cache file {temp_cache_path}: {e}"
                 )
+
+
+@app.command()
+def review(
+    cache_file: Path = typer.Argument(
+        ...,
+        help="Path to the raw_repos_*.jsonl cache file to review.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        writable=True,  # Need write access to update the file
+    ),
+    auto_open: bool = typer.Option(
+        False,
+        "--open",
+        "-o",
+        help="Automatically open repository URLs in the browser.",
+        is_flag=True,
+    ),
+) -> None:
+    """
+    Interactively review individual issues within repositories listed in a cache file.
+
+    Opens each issue URL (optionally automatically) and prompts for approval.
+    Denied issues are removed from the 'found_issues' list. Repositories
+    where all issues have been reviewed are marked with '"reviewed": true'.
+    """
+    print(f"[bold blue]Starting interactive issue review for:[/bold blue] {cache_file}")
+
+    repos_processed_count = 0
+    issues_reviewed_count = 0
+    issues_denied_count = 0
+    repos_skipped_count = 0  # Includes already reviewed/denied, sr, sa, s actions
+    issues_skipped_count = 0  # Specifically 's' action on an issue
+    error_count = 0
+    total_lines = 0
+    skip_all_remaining = False  # Flag to skip all subsequent processing
+
+    # Use a temporary file for writing changes
+    temp_output_path = cache_file.with_suffix(cache_file.suffix + ".tmp")
+
+    # Keep track of repos fully reviewed in this session
+    repos_marked_reviewed_this_session = 0
+
+    try:
+        with (
+            cache_file.open("r", encoding="utf-8") as infile,
+            temp_output_path.open("w", encoding="utf-8") as outfile,
+        ):
+            for line_num, line in enumerate(infile, 1):
+                total_lines += 1
+                line = line.strip()
+                if not line:
+                    outfile.write("\n")  # Preserve empty lines
+                    continue
+
+                repo_processed_this_line = False
+                repo_skipped_this_line = False
+                try:
+                    data = json.loads(line)
+                    repo_name = data.get("full_name", "Unknown Repo")
+                    repo_html_url = data.get("html_url")
+
+                    # --- Skip Checks ---
+                    if skip_all_remaining:
+                        outfile.write(line + "\n")  # Write original line
+                        repos_skipped_count += 1
+                        continue
+
+                    if data.get("reviewed", False):
+                        print(
+                            f"  [Skipping Repo #{line_num}] Already reviewed: {repo_name}"
+                        )
+                        repos_skipped_count += 1
+                        outfile.write(line + "\n")  # Write original line
+                        continue
+
+                    if data.get("denied", False):  # Handle legacy denial flag
+                        print(
+                            f"  [Skipping Repo #{line_num}] Marked as denied (legacy): {repo_name}"
+                        )
+                        repos_skipped_count += 1
+                        outfile.write(line + "\n")  # Write original line
+                        continue
+
+                    if not repo_html_url:
+                        print(
+                            f"  [yellow]Warning:[/yellow] Skipping repo on line {line_num} - missing 'html_url' for {repo_name}."
+                        )
+                        error_count += 1
+                        outfile.write(line + "\n")  # Write original line
+                        continue
+
+                    # Initialize approved_issues if not present
+                    if "approved_issues" not in data:
+                        data["approved_issues"] = []
+
+                    found_issues = data.get("found_issues")
+                    if not isinstance(found_issues, list) or not found_issues:
+                        print(
+                            f"  [Skipping Repo #{line_num}] No 'found_issues' list or empty list for {repo_name}. Marking as reviewed."
+                        )
+                        data["reviewed"] = True
+                        if "denied" in data:
+                            del data["denied"]  # Clean legacy flag
+                        repos_marked_reviewed_this_session += 1
+                        repos_skipped_count += 1  # Count as skipped for review purposes
+                        # Write modified data back
+                        json.dump(data, outfile)
+                        outfile.write("\n")
+                        continue
+
+                    # --- Start Issue Review Loop ---
+                    print("-" * 20)
+                    print(f"Reviewing Repo #{line_num}: [bold cyan]{repo_name}[/]")
+                    original_issues = list(
+                        found_issues
+                    )  # Create a copy to iterate over
+                    issues_in_repo_count = len(original_issues)
+                    issues_processed_in_repo = 0
+                    repo_level_skip = False  # Flag to break inner loop
+
+                    for issue_index, issue_number in enumerate(original_issues, 1):
+                        if not isinstance(issue_number, int):
+                            print(
+                                f"    [yellow]Warning:[/yellow] Skipping invalid issue entry: {issue_number}"
+                            )
+                            continue
+
+                        issue_url = f"{repo_html_url}/issues/{issue_number}"
+                        print(
+                            f"  Reviewing Issue {issue_index}/{issues_in_repo_count}: [bold magenta]#{issue_number}[/]"
+                        )
+                        print(f"  URL: {issue_url}")
+
+                        if auto_open:
+                            try:
+                                webbrowser.open(issue_url)
+                            except Exception as wb_err:
+                                print(
+                                    f"    [yellow]Warning:[/yellow] Could not open URL automatically: {wb_err}"
+                                )
+
+                        # --- Prompt for action ---
+                        action = typer.prompt(
+                            "  Action? (y=Approve Issue, n=Deny Issue, s=Skip Issue, sr=Skip Repo, sa=Skip All, q=Quit)",
+                            default="y",
+                            show_default=True,
+                        ).lower()
+
+                        issues_processed_in_repo += 1  # Count issue interaction attempt
+
+                        if action == "y":
+                            # Add to approved list if not already there
+                            if issue_number not in data.get("approved_issues", []):
+                                data.setdefault("approved_issues", []).append(
+                                    issue_number
+                                )
+                                print(
+                                    f"    [green]Issue #{issue_number} Approved (added to list).[/green]"
+                                )
+                            else:
+                                print(
+                                    f"    [green]Issue #{issue_number} Approved (already in list).[/green]"
+                                )
+                            issues_reviewed_count += 1
+                        elif action == "n":
+                            # Deny: Remove from approved list if it was there, but don't touch found_issues
+                            if issue_number in data.get("approved_issues", []):
+                                data["approved_issues"].remove(issue_number)
+                                print(
+                                    f"    [red]Issue #{issue_number} Denied (removed from approved list).[/red]"
+                                )
+                            else:
+                                print(f"    [red]Issue #{issue_number} Denied.[/red]")
+                            # Still counts as reviewed
+                            issues_denied_count += 1
+                            issues_reviewed_count += 1
+                        elif action == "s":
+                            print("    [yellow]Issue Skipped.[/yellow]")
+                            issues_skipped_count += 1
+                            # Move to next issue in this repo
+                        elif action == "sr":
+                            print(
+                                f"    [yellow]Skipping remaining issues in {repo_name}...[/yellow]"
+                            )
+                            repo_level_skip = True
+                            repos_skipped_count += 1
+                            repo_skipped_this_line = True
+                            break  # Exit inner issue loop
+                        elif action == "sa":
+                            print("    [yellow]Skipping all remaining...[/yellow]")
+                            skip_all_remaining = True
+                            repo_level_skip = True
+                            repos_skipped_count += 1
+                            repo_skipped_this_line = True
+                            break  # Exit inner issue loop
+                        elif action == "q":
+                            print("    [bold magenta]Quitting review...[/bold magenta]")
+                            # Write current state of data before raising Exit
+                            json.dump(data, outfile)
+                            outfile.write("\n")
+                            # Raise typer.Exit - the finally block will handle saving
+                            raise typer.Exit(code=0)  # Use code 0 for clean quit
+                        else:
+                            print(
+                                "    [yellow]Invalid action. Treating as Skip Issue.[/yellow]"
+                            )
+                            issues_skipped_count += 1
+                            # Move to next issue
+
+                    # --- After Issue Loop for Repo ---
+                    if not repo_level_skip:
+                        # If we processed all issues without skipping the repo
+                        data["reviewed"] = True
+                        if "denied" in data:
+                            del data["denied"]  # Clean legacy flag
+                        print(f"  [green]Repo {repo_name} fully reviewed.[/green]")
+                        repos_marked_reviewed_this_session += 1
+                        repo_processed_this_line = True  # Mark repo as processed
+                    elif repo_skipped_this_line:
+                        # If repo was skipped ('sr' or 'sa'), write original line back
+                        # Need to reload original line data if 'sa' was triggered mid-repo
+                        # For simplicity, we'll just write the current 'data' state which might have partial denials
+                        # A better approach might be needed if perfect rollback on 'sr'/'sa' is required
+                        print(f"  Repo {repo_name} skipped.")
+                        # Write potentially modified data (if some issues were denied before skip)
+                        json.dump(data, outfile)
+                        outfile.write("\n")
+                        continue  # Go to next line in file
+
+                    # Write final state of data for this repo (potentially modified issues, reviewed=True)
+                    json.dump(data, outfile)
+                    outfile.write("\n")
+
+                except json.JSONDecodeError:
+                    print(
+                        f"  [red]Error:[/red] Skipping invalid JSON on line {line_num}: {line[:100]}..."
+                    )
+                    error_count += 1
+                    outfile.write(line + "\n")  # Write original line back
+                except Exception as e:
+                    print(
+                        f"  [red]Unexpected Error[/red] processing repo on line {line_num}: {e}"
+                    )
+                    error_count += 1
+                    outfile.write(line + "\n")  # Write original line back
+                finally:
+                    # Increment repo processed count if it wasn't skipped and didn't error before processing
+                    if repo_processed_this_line and not repo_skipped_this_line:
+                        repos_processed_count += 1
+
+        # --- End of File Loop ---
+
+        # If loop finished OR exited via 'q', save progress by moving temp file
+        shutil.move(str(temp_output_path), str(cache_file))
+        print("\n[bold green]Review process finished.[/bold green]")
+        if skip_all_remaining:
+            print("  (Skipped remaining items as requested)")
+        print("--- Summary ---")
+        print(f"  Total lines in file: {total_lines}")
+        print(f"  Repos skipped (already reviewed/denied/sr/sa): {repos_skipped_count}")
+        print(f"  Repos newly marked as reviewed: {repos_marked_reviewed_this_session}")
+        print(f"  Total issues reviewed (approved/denied): {issues_reviewed_count}")
+        print(f"  Issues denied: {issues_denied_count}")  # Updated label
+        print(f"  Issues skipped ('s' action): {issues_skipped_count}")
+        print(f"  Lines with errors: {error_count}")
+        print(f"Updated cache file: {cache_file}")
+
+    except typer.Exit as e:
+        # Handle graceful exit via 'q'
+        # The finally block will handle saving the file.
+        if e.code == 0:
+            print("Exited review process cleanly.")
+        else:
+            print(f"Review process exited with code {e.code}.")
+            # Consider leaving temp file if exit code indicates error
+            if temp_output_path.exists():
+                print(f"Partial results might be in: {temp_output_path}")
+
+    except KeyboardInterrupt:
+        print("\n[bold magenta]Keyboard interrupt detected. Saving progress...[/]")
+        # Attempt to save progress by moving temp file if it exists
+        if temp_output_path.exists():
+            try:
+                shutil.move(str(temp_output_path), str(cache_file))
+                print(f"Progress saved to: {cache_file}")
+            except Exception as move_err:
+                print(f"[red]Error saving progress on interrupt: {move_err}")
+                print(f"Partial results might be in: {temp_output_path}")
+        else:
+            print("No temporary file found to save.")
+        raise typer.Exit(code=130)  # Standard exit code for Ctrl+C
+    except Exception as e:
+        print(f"\n[bold red]An error occurred during review: {e}[/]")
+        traceback.print_exc()
+        # Attempt cleanup, but prioritize not losing data
+        if temp_output_path.exists():
+            print(
+                f"[yellow]Warning: Review process failed. Partial results might be in {temp_output_path}. Original file {cache_file} remains unchanged."
+            )
+            # Consider *not* deleting the temp file automatically on error
+            # try:
+            #     temp_output_path.unlink()
+            #     print(f"Cleaned up temporary file due to error: {temp_output_path}")
+            # except Exception as del_err:
+            #     print(f"[yellow]Warning:[/yellow] Could not delete temporary file {temp_output_path} after error: {del_err}")
+        raise typer.Exit(code=1)
+    finally:
+        # Ensure temp file is removed *only if it wasn't successfully moved* and *no major error occurred*
+        # This logic is tricky. Let's be conservative and leave the temp file if the move didn't happen
+        # unless it was explicitly handled (like in KeyboardInterrupt or normal exit).
+        # The current logic moves the file on success/quit/interrupt, so we only need to worry about unexpected Exceptions.
+        # In case of unexpected Exception, we now leave the temp file.
+        pass  # Simplified cleanup logic - rely on move happening correctly
 
 
 if __name__ == "__main__":

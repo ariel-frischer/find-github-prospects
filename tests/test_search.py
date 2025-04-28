@@ -1,28 +1,29 @@
-import pytest
-from unittest.mock import MagicMock, patch, call, mock_open  # Added mock_open
+import copy  # For deep copying repo data
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import json
-import copy  # For deep copying repo data
+from unittest.mock import MagicMock, call, mock_open, patch  # Added mock_open
 
+import pytest
 from github import (
-    Github,
     Auth,
-    RateLimitExceededException,
+    Github,
     GithubException,
+    RateLimitExceededException,
 )
-from github.Repository import Repository
 from github.ContentFile import ContentFile
-from github.PaginatedList import PaginatedList
 from github.Issue import Issue
+from github.PaginatedList import PaginatedList
+from github.Repository import Repository
 from github.TimelineEvent import TimelineEvent  # Added
+
+from repobird_leadgen.config import (
+    CACHE_DIR,
+    GITHUB_TOKEN,
+)  # Keep for integration tests
 
 # Import the class from the module under test for patching if needed
 from repobird_leadgen.github_search import GitHubSearcher
-from repobird_leadgen.config import (
-    GITHUB_TOKEN,
-    CACHE_DIR,
-)  # Keep for integration tests
 
 # Basic check to skip tests if no token is available
 # Apply only to integration tests now
@@ -423,7 +424,7 @@ def test_find_qualifying_issues_no_filters(
 
     result = searcher._find_qualifying_issues(repo, "bug", None, None)
 
-    assert result is True
+    assert result  # Check if the list is non-empty
     searcher._execute_with_retry.assert_called_once_with(
         repo.get_issues, state="open", labels=["bug"]
     )
@@ -444,7 +445,7 @@ def test_find_qualifying_issues_no_issues_found(
 
     result = searcher._find_qualifying_issues(repo, "bug", None, None)
 
-    assert result is False
+    assert not result  # Check if the list is empty
     searcher._execute_with_retry.assert_called_once_with(
         repo.get_issues, state="open", labels=["bug"]
     )
@@ -472,7 +473,7 @@ def test_find_qualifying_issues_age_met(
 
     result = searcher._find_qualifying_issues(repo, "bug", 10, None)  # Max 10 days old
 
-    assert result is True
+    assert result  # Check if the list is non-empty
     searcher._execute_with_retry.assert_called_once_with(
         repo.get_issues, state="open", labels=["bug"]
     )
@@ -499,7 +500,7 @@ def test_find_qualifying_issues_age_not_met(
 
     result = searcher._find_qualifying_issues(repo, "bug", 10, None)  # Max 10 days old
 
-    assert result is False
+    assert not result  # Check if the list is empty
     searcher._execute_with_retry.assert_called_once_with(
         repo.get_issues, state="open", labels=["bug"]
     )
@@ -527,7 +528,7 @@ def test_find_qualifying_issues_pr_met(
 
     result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
 
-    assert result is True
+    assert result  # Check if the list is non-empty
     # _execute_with_retry is called for get_issues AND potentially for get_timeline inside _get_linked_prs_count
     # We only assert the get_issues call here, assuming _get_linked_prs_count works as tested separately
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
@@ -553,7 +554,7 @@ def test_find_qualifying_issues_pr_not_met(
 
     result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
 
-    assert result is False
+    assert not result  # Check if the list is empty
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     searcher._get_linked_prs_count.assert_called_once_with(issue1)
 
@@ -580,7 +581,7 @@ def test_find_qualifying_issues_pr_count_error(
 
     result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
 
-    assert result is True  # Should qualify based on issue2
+    assert result  # Should qualify based on issue2 (list is non-empty)
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     assert searcher._get_linked_prs_count.call_count == 2
     searcher._get_linked_prs_count.assert_has_calls([call(issue1), call(issue2)])
@@ -611,7 +612,7 @@ def test_find_qualifying_issues_age_and_pr_met(
         repo, "bug", 10, 2
     )  # Max 10 days, Max 2 PRs
 
-    assert result is True
+    assert result  # Check if the list is non-empty
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     searcher._get_linked_prs_count.assert_called_once_with(issue_good)
 
@@ -641,7 +642,7 @@ def test_find_qualifying_issues_age_fail_pr_met(
         repo, "bug", 10, 2
     )  # Max 10 days, Max 2 PRs
 
-    assert result is False
+    assert not result  # Check if the list is empty
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     searcher._get_linked_prs_count.assert_not_called()  # Should not be called if age fails first
 
@@ -671,7 +672,7 @@ def test_find_qualifying_issues_age_met_pr_fail(
         repo, "bug", 10, 2
     )  # Max 10 days, Max 2 PRs
 
-    assert result is False
+    assert not result  # Check if the list is empty
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     searcher._get_linked_prs_count.assert_called_once_with(issue_young)
 
@@ -708,7 +709,7 @@ def test_find_qualifying_issues_multiple_issues_one_qualifies(
         repo, "bug", 15, 2
     )  # Max 15 days, Max 2 PRs
 
-    assert result is True  # Should qualify based on issue_good
+    assert result  # Should qualify based on issue_good (list is non-empty)
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     # Check PR count calls: Should be called for issue_many_prs (age ok) and issue_good (age ok)
     assert searcher._get_linked_prs_count.call_count == 2
@@ -752,9 +753,11 @@ def mock_search_flow(mocker, mock_github, mock_repository, mock_filesystem, requ
     mock_initial_check = mocker.patch.object(
         searcher, "_has_open_issue_with_label_api", return_value=True
     )
-    # Simulate detailed check returning True by default
+    # Simulate detailed check returning a list with one issue ID by default
     mock_detailed_check = mocker.patch.object(
-        searcher, "_find_qualifying_issues", return_value=True
+        searcher,
+        "_find_qualifying_issues",
+        return_value=[123],  # Example qualifying ID list
     )
 
     # Mock _execute_with_retry
@@ -841,13 +844,10 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
     mock_json_dump = mock_search_flow["mock_json_dump"]
     # issue_cache_state = mock_search_flow["issue_cache_state"] # Removed F841
 
-    # Mock detailed check to return True
-    mock_search_flow["mock_detailed_check"].return_value = True
+    # Mock detailed check to return a qualifying list of issue IDs
+    qualifying_ids = [456]
+    mock_search_flow["mock_detailed_check"].return_value = qualifying_ids
     max_age, max_prs = 30, 1
-
-    # Determine expected results based on OBSERVED SUT behavior for filters:
-    # It runs detailed check regardless of cache state (unless detailed check itself returns false)
-    expected_results = 1  # Always expect 1 if detailed check passes
 
     results = list(
         searcher.search(
@@ -860,26 +860,35 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
         )
     )
 
-    assert len(results) == expected_results
+    # assert len(results) == expected_results # Removed F821 - Redundant check
+
+    assert (
+        len(results) == 1
+    )  # Should qualify based on non-empty list from detailed check
 
     # Assertions common to all states
     mock_main_cache_open_func.assert_called_with("a", encoding="utf-8")
     main_cache_handle = mock_main_cache_open_func.return_value
-    # Issue cache should NEVER be written when filters are active
+    # Internal issue cache should NOT be written when detailed filters are active
     mock_issue_cache_open_func.assert_not_called()
 
     # Initial check is always bypassed with filters
     mock_search_flow["mock_initial_check"].assert_not_called()
-    # Detailed check is always called when it gets this far (i.e., not skipped earlier by something else)
-    # and the detailed check returns True in this test case.
+    # Detailed check is always called when filters are active
     mock_search_flow["mock_detailed_check"].assert_called_once_with(
         repo1, label, max_age, max_prs
     )
 
-    # Assertions for qualifying cases (all states yield result here)
+    # Assertions for qualifying case
     assert results[0] == repo1
-    # Check main cache write
-    mock_json_dump.assert_called_once_with(repo1.raw_data, main_cache_handle)
+    # Check main cache write - should contain 'found_issues' list
+    expected_data = repo1.raw_data
+    expected_data["found_issues"] = qualifying_ids  # Add the expected field
+    expected_data.pop(
+        "_repobird_found_issues_basic", None
+    )  # Remove old field if present
+
+    mock_json_dump.assert_called_once_with(expected_data, main_cache_handle)
     main_cache_handle.write.assert_called_once_with("\n")
     main_cache_handle.flush.assert_called_once()
 
@@ -901,8 +910,8 @@ def test_search_with_filters_skips_detailed(mock_print, mock_search_flow):
     mock_json_dump = mock_search_flow["mock_json_dump"]
     # issue_cache_state = mock_search_flow["issue_cache_state"] # Removed F841
 
-    # Mock detailed check to return False
-    mock_search_flow["mock_detailed_check"].return_value = False
+    # Mock detailed check to return an empty list (non-qualifying)
+    mock_search_flow["mock_detailed_check"].return_value = []
     max_age, max_prs = 30, 1
 
     results = list(
@@ -918,19 +927,21 @@ def test_search_with_filters_skips_detailed(mock_print, mock_search_flow):
 
     assert len(results) == 0
 
+    assert len(results) == 0  # Should not qualify
+
     # Assertions common to all states
     mock_main_cache_open_func.assert_called_with("a", encoding="utf-8")
     main_cache_handle = mock_main_cache_open_func.return_value
-    # Issue cache should NEVER be written when filters are active
+    # Internal issue cache should NOT be written when detailed filters are active
     mock_issue_cache_open_func.assert_not_called()
     # Initial check is bypassed when filters are active
     mock_search_flow["mock_initial_check"].assert_not_called()
-    # Detailed check is called (and returns False)
+    # Detailed check is called (and returns empty list)
     mock_search_flow["mock_detailed_check"].assert_called_once_with(
         repo1, label, max_age, max_prs
     )
 
-    # Assert nothing dumped/written
+    # Assert nothing dumped/written to main cache
     mock_json_dump.assert_not_called()
     main_cache_handle.write.assert_not_called()
     main_cache_handle.flush.assert_not_called()
@@ -1021,6 +1032,21 @@ def test_search_no_filters_qualifies(mock_print, mock_search_flow):
     mock_issue_cache_open_func = mock_search_flow["mock_issue_cache_open_func"]
     mock_json_dump = mock_search_flow["mock_json_dump"]
     issue_cache_state = mock_search_flow["issue_cache_state"]
+    cache_key = mock_search_flow["cache_key"]
+
+    # Setup expected issue details for cache hit/miss scenarios
+    expected_found_issues = []
+    if issue_cache_state == "hit_true":
+        # Extract numbers from the details stored in the mock cache setup
+        mock_details = searcher.issue_cache[cache_key][1]
+        expected_found_issues = [
+            item.get("number")
+            for item in mock_details
+            if isinstance(item, dict) and item.get("number") is not None
+        ]
+    elif issue_cache_state == "miss":
+        # API check path - currently results in empty list in output
+        expected_found_issues = []
 
     results = list(
         searcher.search(
@@ -1042,14 +1068,19 @@ def test_search_no_filters_qualifies(mock_print, mock_search_flow):
     # Detailed check should NOT be performed
     mock_search_flow["mock_detailed_check"].assert_not_called()
 
+    # Prepare expected data for main cache dump
+    expected_data = repo1.raw_data
+    expected_data["found_issues"] = expected_found_issues  # Add the list of IDs
+    expected_data.pop("_repobird_found_issues_basic", None)  # Remove old field
+
     if issue_cache_state == "miss":
         # Initial check performed (API mock returns True)
         mock_search_flow["mock_initial_check"].assert_called_once_with(repo1, label)
-        # Issue cache appended (has_label=True)
+        # Internal issue cache appended (has_label=True, details=[])
         mock_issue_cache_open_func.assert_called_with("a", encoding="utf-8")
         assert_issue_cache_dump(
             mock_json_dump, repo1.full_name, label, True, issue_cache_handle
-        )
+        )  # This checks the internal cache dump
         # Repo data dumped to main cache
         mock_main_cache_open_func.assert_called_with("a", encoding="utf-8")
         # Find the main cache dump call
@@ -1060,16 +1091,22 @@ def test_search_no_filters_qualifies(mock_print, mock_search_flow):
                 main_cache_call = c
                 break
         assert main_cache_call is not None, "Main cache dump call not found"
-        assert main_cache_call.args[0] == repo1.raw_data
-        assert mock_json_dump.call_count == 2
+        assert (
+            main_cache_call.args[0] == expected_data
+        )  # Check data written to main cache
+        assert (
+            mock_json_dump.call_count == 2
+        )  # One for internal cache, one for main cache
     elif issue_cache_state == "hit_true":
         # Initial check NOT performed (cache hit)
         mock_search_flow["mock_initial_check"].assert_not_called()
-        # Issue cache NOT appended
+        # Internal issue cache NOT appended
         mock_issue_cache_open_func.assert_not_called()
         # Repo data dumped to main cache
         mock_main_cache_open_func.assert_called_with("a", encoding="utf-8")
-        mock_json_dump.assert_called_once_with(repo1.raw_data, main_cache_handle)
+        mock_json_dump.assert_called_once_with(
+            expected_data, main_cache_handle
+        )  # Check data written to main cache
 
     # Check main cache file writes
     main_cache_handle.write.assert_called_once_with("\n")
@@ -1123,17 +1160,17 @@ def test_search_no_filters_skips_initial(mock_print, mock_search_flow):
     if issue_cache_state == "miss":
         # Initial check performed (API mock returns False)
         mock_search_flow["mock_initial_check"].assert_called_once_with(repo1, label)
-        # Issue cache appended (has_label=False)
+        # Internal issue cache appended (has_label=False, details=[])
         mock_issue_cache_open_func.assert_called_with("a", encoding="utf-8")
         assert_issue_cache_dump(
             mock_json_dump, repo1.full_name, label, False, issue_cache_handle
         )
-        # Only issue cache dump expected
+        # Only internal issue cache dump expected
         assert mock_json_dump.call_count == 1
     elif issue_cache_state == "hit_false":
         # Initial check NOT performed (cache hit)
         mock_search_flow["mock_initial_check"].assert_not_called()
-        # Issue cache NOT appended
+        # Internal issue cache NOT appended
         mock_issue_cache_open_func.assert_not_called()
         # No dump expected
         mock_json_dump.assert_not_called()
@@ -1146,6 +1183,7 @@ def test_search_no_filters_skips_initial(mock_print, mock_search_flow):
 # --- Integration Tests --- (Kept for context, might need adjustments later)
 
 
+# Add a newline before the next test definition for clarity and to avoid potential parser issues
 @pytest.mark.integration
 @skip_if_no_token
 def test_basic_search_integration(tmp_path):

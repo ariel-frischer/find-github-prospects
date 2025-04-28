@@ -1,28 +1,34 @@
 from __future__ import annotations
-from typing import (
-    Iterator,
-    Optional,
-    Dict,
-    Tuple,
-    Set,
-    List,
-    Any,
-)  # Added Set, List, Any
-import random  # For jitter
-from github import Github, Auth
-from github.Repository import Repository
-from github.Issue import Issue
-from tqdm import tqdm
-from .config import GITHUB_TOKEN, CACHE_DIR  # Added CACHE_DIR
-from datetime import datetime, timedelta, timezone
-import time
+
 import json  # For saving raw data incrementally
+import random  # For jitter
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path  # For cache file path handling
-from github import RateLimitExceededException, GithubException, UnknownObjectException
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)  # Added Set, List, Any
+
+from github import (
+    Auth,
+    Github,
+    GithubException,
+    RateLimitExceededException,
+    UnknownObjectException,
+)
+from github.Issue import Issue
+from github.Repository import Repository
+from tqdm import tqdm
 
 # Import the new browser checker
 from .browser_checker import BrowserIssueChecker
-
+from .config import CACHE_DIR, GITHUB_TOKEN  # Added CACHE_DIR
 
 # Base query for repositories, label is handled separately
 _REPO_QUERY_TEMPLATE = (
@@ -225,11 +231,13 @@ class GitHubSearcher:
         label: str,
         max_issue_age_days: Optional[int],
         max_linked_prs: Optional[int],
-    ) -> bool:
+    ) -> List[int]:
         """
-        Fetches open issues with the label and checks if *any* satisfy the age/PR criteria.
-        Returns True if at least one qualifying issue is found, False otherwise.
+        Fetches open issues with the label and returns the numbers of those
+        that satisfy the age/PR criteria (up to a limit).
+        Returns a list of qualifying issue numbers.
         """
+        qualifying_issue_numbers: List[int] = []
         try:
             print(
                 f"  Performing detailed check: Repo {repo.full_name}, Label '{label}', Max Age: {max_issue_age_days}, Max PRs: {max_linked_prs}"
@@ -243,7 +251,7 @@ class GitHubSearcher:
                 print(
                     f"  [!] Failed to fetch issues for {repo.full_name} after retries."
                 )
-                return False
+                return []  # Return empty list on failure
 
             # Calculate age threshold if needed
             age_threshold = None
@@ -301,29 +309,30 @@ class GitHubSearcher:
 
                 # If we reach here, the issue satisfies all active criteria
                 print(f"      [+] Issue #{issue.number} qualifies!")
-                return True  # Found at least one qualifying issue
+                qualifying_issue_numbers.append(issue.number)
+                # Continue checking other issues up to the limit
 
-            # If loop finishes without returning True, no qualifying issues were found
+            # If loop finishes, return the list of numbers found
             print(
-                f"  No qualifying issues found among the first {issues_checked} checked for {repo.full_name} with label '{label}'."
+                f"  Found {len(qualifying_issue_numbers)} qualifying issues among the first {issues_checked} checked for {repo.full_name} with label '{label}'."
             )
-            return False
+            return qualifying_issue_numbers
 
         except RuntimeError as e:
             print(
                 f"[red]Error during detailed issue check for {repo.full_name} after retries: {e}"
             )
-            return False
+            return []  # Return empty list on error
         except GithubException as ge:
             print(
                 f"[red]GitHub error during detailed issue check for {repo.full_name}: {ge}"
             )
-            return False
+            return []  # Return empty list on error
         except Exception as e:
             print(
                 f"[red]Unexpected error during detailed issue check for {repo.full_name}: {e}"
             )
-            return False
+            return []  # Return empty list on error
 
     # --- New Helper Methods --- END
 
@@ -573,31 +582,37 @@ class GitHubSearcher:
 
                         # --- Qualification Logic --- START
                         repo_qualifies = False
-                        issue_details_for_output: List[
+                        found_issue_numbers: List[int] = []
+                        issue_details_for_cache: List[
                             Dict[str, Any]
-                        ] = []  # Store basic details if repo qualifies
+                        ] = []  # For internal issue cache only
 
                         if detailed_filters_active:
-                            # --- Detailed Filter Path --- MUST fetch issues
+                            # --- Detailed Filter Path ---
                             pbar.set_postfix_str(
                                 f"Detailed check {repo_full_name}", refresh=True
                             )
                             detailed_check_count += 1
-                            repo_qualifies = self._find_qualifying_issues(
+                            # Call the modified function which returns a list of issue numbers
+                            qualifying_issue_numbers = self._find_qualifying_issues(
                                 repo, label, max_issue_age_days, max_linked_prs
                             )
-                            # Note: We don't use or update the `issue_cache` here, as it only
-                            # stores basic label existence, not the detailed filter result.
-                            # We also don't get `issue_details_for_output` from this path currently.
+                            repo_qualifies = bool(
+                                qualifying_issue_numbers
+                            )  # Qualifies if list is not empty
+                            found_issue_numbers = (
+                                qualifying_issue_numbers  # Store the list
+                            )
+                            # Note: We don't use or update the `issue_cache` here.
 
                         else:
-                            # --- Basic Filter Path --- Check label existence only (using cache/API/browser)
+                            # --- Basic Filter Path ---
                             cache_key = (repo_full_name, label)
                             has_label_initially = False
 
                             if cache_key in self.issue_cache:
                                 # Use cached basic label existence result
-                                has_label_initially, issue_details_for_output = (
+                                has_label_initially, issue_details_for_cache = (
                                     self.issue_cache[cache_key]
                                 )
                                 print(
@@ -632,17 +647,15 @@ class GitHubSearcher:
                                                 repo, label
                                             )
                                         )
-                                        check_result = (
-                                            api_has_label,
-                                            [],
-                                        )  # Simulate tuple, no details from API check
+                                        # API check doesn't give details, so details list is empty
+                                        check_result = (api_has_label, [])
                                     except Exception as api_err:
                                         print(
                                             f"[red]Error during API label check for {repo_full_name}: {api_err}. Skipping repo."
                                         )
                                         continue  # Skip to next repo
 
-                                # Update cache with the result of the live check
+                                # Update internal issue cache with the result of the live check
                                 if check_result is not None:
                                     has_label_initially, issue_details_from_check = (
                                         check_result
@@ -650,17 +663,17 @@ class GitHubSearcher:
                                     # Store result in memory cache
                                     self.issue_cache[cache_key] = (
                                         has_label_initially,
-                                        issue_details_from_check,
+                                        issue_details_from_check,  # Store details in internal cache
                                     )
                                     # Append result to file cache
                                     self._append_to_issue_cache(
                                         repo_full_name,
                                         label,
                                         has_label_initially,
-                                        issue_details_from_check,
+                                        issue_details_from_check,  # Write details to internal cache file
                                         repo.html_url,
                                     )
-                                    issue_details_for_output = issue_details_from_check  # Use details from check
+                                    issue_details_for_cache = issue_details_from_check  # Use details from check
                                     print(
                                         f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label_initially}. Cached."
                                     )
@@ -673,6 +686,19 @@ class GitHubSearcher:
 
                             # Qualify based on the initial check result
                             repo_qualifies = has_label_initially
+                            # Determine issue numbers list for basic path
+                            if repo_qualifies:
+                                # If browser check provided details, extract numbers
+                                # Assuming the dicts in issue_details_for_cache have a 'number' key
+                                # Filter out None values explicitly
+                                found_issue_numbers = [
+                                    num
+                                    for item in issue_details_for_cache
+                                    if isinstance(item, dict)
+                                    and (num := item.get("number")) is not None
+                                ]
+                            else:
+                                found_issue_numbers = []  # Ensure it's an empty list if not qualified
                         # --- Qualification Logic --- END
 
                         # --- Process Qualified Repo ---
@@ -682,13 +708,19 @@ class GitHubSearcher:
                             pbar.set_postfix_str("Found qualified", refresh=False)
                             print(f"\n  [+] Qualified: {repo.full_name}")
                             print(f"      URL: {repo.html_url}")
+                            print(
+                                f"      Found Issue IDs: {found_issue_numbers}"
+                            )  # Print IDs
                             print(f"      ({found_count}/{max_results})")
 
                             # Save raw data to the main cache file
-                            # Add the basic issue details found during the initial check (if available)
-                            repo.raw_data["_repobird_found_issues_basic"] = (
-                                issue_details_for_output
+                            # Add the list of found issue numbers
+                            repo.raw_data["found_issues"] = (
+                                found_issue_numbers  # Store list of ints
                             )
+
+                            # Remove the old key if it exists (defensive)
+                            repo.raw_data.pop("_repobird_found_issues_basic", None)
 
                             json.dump(repo.raw_data, f_cache)
                             f_cache.write("\n")

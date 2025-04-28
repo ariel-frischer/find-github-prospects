@@ -13,10 +13,14 @@ from rich import print
 # Assume repobird_leadgen is installed or PYTHONPATH is set correctly
 from repobird_leadgen.browser_checker import BrowserIssueChecker
 
-# Script to fix our cached old jsonl items that were created before the _repobird_found_issue_numbers field was needed.
+# Script to update raw repo cache JSONL files.
+# Handles:
+# 1. Renaming legacy "_repobird_found_issues_basic" field to "found_issues".
+# 2. Populating empty "found_issues" (or renamed legacy field) by searching for issue numbers with the specified label using BrowserIssueChecker.
+# 3. Upgrading "found_issues" lists containing only integers (issue numbers) to lists of dictionaries with full issue details (title, description) using BrowserIssueChecker.
 app = typer.Typer(
     add_completion=False,
-    help="Updates a raw repo cache JSONL file by adding missing '_repobird_found_issues' or upgrading existing integer-only lists to full issue details using the BrowserIssueChecker.",
+    help="Updates/Upgrades a raw repo cache JSONL file: renames legacy fields, populates empty issue lists, and upgrades integer-only lists to full issue details using the BrowserIssueChecker.",
     rich_markup_mode="markdown",
 )
 
@@ -51,12 +55,14 @@ def main(
     ),
 ):
     """
-    Processes a JSONL cache file, finds lines missing the issue details field
-    or containing only issue numbers, runs the browser checker to get full details,
-    and updates the file in place.
+    Processes a JSONL cache file:
+    - Renames `_repobird_found_issues_basic` to `found_issues`.
+    - If `found_issues` is missing or empty, populates it with issue numbers found via browser check for the given label.
+    - If `found_issues` contains only integers, fetches full details for those issues via browser check.
+    Updates the file in place.
     """
     print(
-        f"[bold blue]Updating/Upgrading cache file with issue details:[/bold blue] {cache_file}"
+        f"[bold blue]Updating/Upgrading cache file issue data:[/bold blue] {cache_file}"
     )
     print(f"  Using label: '{label}' for checks")
     print(f"  Browser Headless: {headless}")
@@ -114,116 +120,146 @@ def main(
                         continue
 
                     needs_update = False
-                    issue_numbers_to_fetch = []
+                    write_back_original = (
+                        False  # Flag to write original line if update fails
+                    )
 
-                    if "_repobird_found_issues" not in data:
-                        needs_update = True
+                    # --- 1. Handle legacy field rename ---
+                    if "_repobird_found_issues_basic" in data:
                         print(
-                            f"\n[cyan]Field missing, fetching issue details for:[/cyan] {repo_name}"
+                            f"\n[cyan]Found legacy field '_repobird_found_issues_basic' in:[/cyan] {repo_name}"
                         )
-                        # Use check_repo_for_issue_label which gets numbers and details
+                        legacy_value = data.pop(
+                            "_repobird_found_issues_basic"
+                        )  # Remove old key
+                        # Assign to new key, even if empty, might be upgraded later
+                        data["found_issues"] = legacy_value
+                        needs_update = True  # Mark for potential write
+                        print(
+                            f"  Renamed to 'found_issues'. Current value: {legacy_value}"
+                        )
+
+                    # --- 2. Populate if 'found_issues' is missing or empty ---
+                    if "found_issues" not in data or data["found_issues"] == []:
+                        if "found_issues" not in data:
+                            print(
+                                f"\n[cyan]Field 'found_issues' missing, fetching issue numbers for:[/cyan] {repo_name}"
+                            )
+                        else:  # It exists but is empty
+                            print(
+                                f"\n[cyan]Field 'found_issues' is empty, fetching issue numbers for:[/cyan] {repo_name}"
+                            )
+
                         try:
+                            # Use check_repo_for_issue_label to find issues with the label
                             has_label, issue_details = (
                                 checker.check_repo_for_issue_label(repo_name, label)
                             )
-                            data["_repobird_found_issues"] = (
-                                issue_details  # Add the new field
+
+                            # Extract just the numbers
+                            issue_numbers = [
+                                item.get("number")
+                                for item in issue_details
+                                if isinstance(item, dict)
+                                and item.get("number") is not None
+                            ]
+
+                            data["found_issues"] = (
+                                issue_numbers  # Add/update field with numbers list
                             )
+                            needs_update = True
                             print(
-                                f"  [green]Added issue details:[/green] {len(issue_details)} issues found (Has Label: {has_label})"
+                                f"  [green]Populated 'found_issues' with {len(issue_numbers)} issue numbers.[/green] (Repo Has Label: {has_label})"
                             )
-                            data.pop(
-                                "_repobird_found_issue_numbers", None
-                            )  # Clean up old field if present
                             updated_count += 1
                         except Exception as check_err:
                             print(
-                                f"[red]Error checking issues for {repo_name}: {check_err}. Skipping update."
+                                f"[red]Error checking issues for {repo_name}: {check_err}. Skipping update for this line.[/red]"
                             )
                             error_count += 1
-                            needs_update = False  # Prevent writing potentially bad data
-                            temp_f.write(line + "\n")  # Write original line back
-                            continue  # Skip to next line
+                            write_back_original = (
+                                True  # Ensure original line is written on error
+                            )
 
-                    elif isinstance(data["_repobird_found_issues"], list) and all(
-                        isinstance(item, int) for item in data["_repobird_found_issues"]
+                    # --- 3. Upgrade if 'found_issues' contains only integers ---
+                    elif isinstance(data.get("found_issues"), list) and all(
+                        isinstance(item, int) for item in data["found_issues"]
                     ):
-                        # Field exists but contains only integers (old format)
-                        needs_update = True
-                        issue_numbers_to_fetch = data["_repobird_found_issues"]
-                        print(
-                            f"\n[cyan]Old format found, fetching details for {len(issue_numbers_to_fetch)} issues in:[/cyan] {repo_name}"
-                        )
-                        # Fetch details individually using the existing numbers
-                        new_issue_details = []
-                        temp_page = None  # Use a single page for this repo's issues
-                        try:
-                            temp_page = (
-                                checker._get_new_page()
-                            )  # Get a page from the checker
-                            for issue_num in issue_numbers_to_fetch:
-                                issue_url = (
-                                    f"https://github.com/{repo_name}/issues/{issue_num}"
-                                )
-                                details = checker._fetch_issue_details(
-                                    temp_page, issue_url
-                                )
-                                if details:
-                                    new_issue_details.append(
-                                        {
-                                            "number": issue_num,
-                                            "title": details["title"],
-                                            "description": details["description"],
-                                        }
-                                    )
-                                else:
-                                    print(
-                                        f"    [yellow]Skipping details for issue {issue_num} due to fetch error."
-                                    )
-                                time.sleep(
-                                    0.5
-                                )  # Small delay between issue detail fetches
-
-                            data["_repobird_found_issues"] = (
-                                new_issue_details  # Replace old list with new details
-                            )
+                        issue_numbers_to_fetch = data["found_issues"]
+                        if not issue_numbers_to_fetch:
+                            # List exists but is empty, already handled above or no action needed
+                            pass
+                        else:
                             print(
-                                f"  [green]Upgraded issue details:[/green] Fetched details for {len(new_issue_details)} issues."
+                                f"\n[cyan]Integer list found, fetching full details for {len(issue_numbers_to_fetch)} issues in:[/cyan] {repo_name}"
                             )
-                            updated_count += 1
-                        except Exception as fetch_err:
-                            print(
-                                f"[red]Error fetching individual issue details for {repo_name}: {fetch_err}. Skipping update."
-                            )
-                            error_count += 1
-                            needs_update = False  # Prevent writing potentially bad data
-                            temp_f.write(line + "\n")  # Write original line back
-                            continue  # Skip to next line
-                        finally:
-                            if temp_page:
-                                try:
-                                    temp_page.close()
-                                except Exception:
-                                    pass  # Ignore errors closing temp page
+                            needs_update = True  # Mark for potential write
+                            new_issue_details = []
+                            temp_page = None
+                            try:
+                                temp_page = checker._get_new_page()
+                                for issue_num in issue_numbers_to_fetch:
+                                    issue_url = f"https://github.com/{repo_name}/issues/{issue_num}"
+                                    details = checker._fetch_issue_details(
+                                        temp_page, issue_url
+                                    )
+                                    if details:
+                                        new_issue_details.append(
+                                            {
+                                                "number": issue_num,
+                                                "title": details["title"],
+                                                "description": details["description"],
+                                            }
+                                        )
+                                    else:
+                                        print(
+                                            f"    [yellow]Skipping details for issue {issue_num} due to fetch error.[/yellow]"
+                                        )
+                                    time.sleep(0.5)  # Small delay
 
-                    elif isinstance(data["_repobird_found_issues"], list):
-                        # Field exists and is a list, assume it's already the new format (list of dicts)
-                        # print(f"Skipping line {processed_count}: Already has issue details.") # Optional: uncomment for verbose logging
+                                data["found_issues"] = (
+                                    new_issue_details  # Replace int list with dict list
+                                )
+                                print(
+                                    f"  [green]Upgraded 'found_issues':[/green] Fetched details for {len(new_issue_details)} issues."
+                                )
+                                updated_count += 1  # Count upgrade as an update
+                            except Exception as fetch_err:
+                                print(
+                                    f"[red]Error fetching individual issue details for {repo_name}: {fetch_err}. Skipping upgrade for this line.[/red]"
+                                )
+                                error_count += 1
+                                write_back_original = True  # Write original line back
+                            finally:
+                                if temp_page:
+                                    try:
+                                        temp_page.close()
+                                    except Exception:
+                                        pass
+
+                    # --- 4. Handle existing full details or unexpected formats ---
+                    elif isinstance(data.get("found_issues"), list):
+                        # Field exists, is a list, but not all integers -> assume it's already the new format (list of dicts)
+                        # print(f"Skipping line {processed_count}: Already has full issue details.") # Optional verbose log
                         pass  # No update needed
                     else:
-                        # Field exists but is not a list (unexpected format)
+                        # Field exists but is not a list or None (unexpected format)
+                        field_type = type(data.get("found_issues"))
                         print(
-                            f"[yellow]Skipping line {processed_count}: Unexpected format for _repobird_found_issues: {type(data['_repobird_found_issues'])}"
+                            f"[yellow]Skipping line {processed_count}: Unexpected format for 'found_issues': {field_type}[/yellow]"
                         )
-                        needs_update = False  # Don't attempt to write
+                        write_back_original = True  # Write original line back
 
-                    # Write the (potentially updated) data back to the temp file if an update happened or no update was needed
-                    # Only skip writing if an error occurred during fetching/updating
-                    if (
-                        needs_update is not False
-                    ):  # Write if needs_update is True or None (meaning no update needed)
-                        json.dump(data, temp_f)
-                    temp_f.write("\n")
+                    # --- Write back ---
+                    if write_back_original:
+                        temp_f.write(
+                            line + "\n"
+                        )  # Write original line due to error or skip
+                    elif needs_update:
+                        json.dump(data, temp_f)  # Write updated data
+                        temp_f.write("\n")
+                    else:  # No update needed, write original line
+                        temp_f.write(line + "\n")
 
                 except json.JSONDecodeError:
                     print(

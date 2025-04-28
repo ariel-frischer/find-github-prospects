@@ -1,5 +1,8 @@
-import pytest
+import importlib
+import logging
 import sys
+
+import pytest
 
 # Note: We avoid importlib.reload and instead mock os.getenv directly
 # before importing the config module within each test function.
@@ -61,7 +64,10 @@ def test_load_config_with_custom_vars(mocker):
 def test_load_config_without_token(mocker):
     """Test config loading raises RuntimeError when GITHUB_TOKEN is missing."""
 
-    # Define the behavior of os.getenv for this test
+    # 1. Prevent load_dotenv from running in this test
+    mocker.patch("repobird_leadgen.config.load_dotenv", return_value=None)
+
+    # 2. Mock os.getenv to return None for GITHUB_TOKEN
     def mock_getenv(key, default=None):
         if key == "GITHUB_TOKEN":
             return None  # Simulate missing token
@@ -71,13 +77,42 @@ def test_load_config_without_token(mocker):
 
     mocker.patch("repobird_leadgen.config.os.getenv", side_effect=mock_getenv)
 
-    # Ensure the module is removed from cache before import attempt
-    if "repobird_leadgen.config" in sys.modules:
-        del sys.modules["repobird_leadgen.config"]
+    # 3. Ensure the module is removed from cache before import attempt
+    # 3. Ensure the module is removed from cache before import attempt
+    config_module_name = "repobird_leadgen.config"
+    if config_module_name in sys.modules:
+        logging.warning(f"Removing '{config_module_name}' from sys.modules")
+        del sys.modules[config_module_name]
+    else:
+        logging.info(f"'{config_module_name}' not found in sys.modules. Good.")
 
-    # Expect RuntimeError during the import itself
-    with pytest.raises(RuntimeError, match="GITHUB_TOKEN missing"):
-        pass
+    # Try calling the mocked getenv to see what it returns for the token
+    import os
+
+    logging.info(
+        f"Mocked os.getenv('GITHUB_TOKEN') returns: {os.getenv('GITHUB_TOKEN')}"
+    )
+
+    # Expect RuntimeError during the import of the config module itself,
+    # which happens when github_search (or config directly) is imported.
+    # 4. Expect RuntimeError during import
+    logging.info(f"Attempting import of '{config_module_name}' inside pytest.raises...")
+    try:
+        with pytest.raises(
+            RuntimeError, match="GITHUB_TOKEN missing – create a PAT and add to .env"
+        ):
+            # Use import_module to explicitly trigger the import within the context
+            importlib.import_module(config_module_name)
+        logging.info("Successfully caught expected RuntimeError on import.")
+    except Exception as e:
+        logging.error(
+            f"Caught unexpected exception during import attempt: {e}", exc_info=True
+        )
+        pytest.fail(f"Import raised unexpected exception: {e}")
+    # This part will only be reached if pytest.raises fails
+    logging.error(
+        f"FAILED: Did not raise RuntimeError during import of '{config_module_name}'"
+    )
 
 
 # Cleanup: Ensure the module is removed after tests run in this file
