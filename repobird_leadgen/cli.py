@@ -800,12 +800,28 @@ def review(
                                     f"    [yellow]Warning:[/yellow] Could not open URL automatically: {wb_err}"
                                 )
 
-                        # --- Prompt for action ---
-                        action = typer.prompt(
-                            "  Action? (y=Approve Issue, n=Deny Issue, s=Skip Issue, sr=Skip Repo, sa=Skip All, q=Quit)",
-                            default="y",
-                            show_default=True,
-                        ).lower()
+                        # --- Prompt for action --- Loop until a non-'o' action is chosen
+                        while True:
+                            action = typer.prompt(
+                                "  Action? (y=Approve, n=Deny, s=Skip Issue, sr=Skip Repo, sa=Skip All, [bold cyan]o=Open URL[/], q=Quit)",
+                                default="y",
+                                show_default=True,
+                            ).lower()
+
+                            if action != "o":
+                                break  # Exit the inner loop if action is not 'o'
+
+                            # Handle 'o' action: open URL and re-prompt
+                            print(f"    Opening URL: {issue_url}")
+                            try:
+                                webbrowser.open(issue_url)
+                            except Exception as wb_err:
+                                print(
+                                    f"    [yellow]Warning:[/yellow] Could not open URL automatically: {wb_err}"
+                                )
+                            # continue is implicit as the while loop condition (action != 'o') is false
+
+                        # --- Process the chosen action (y, n, s, sr, sa, q) ---
 
                         issues_processed_in_repo += 1  # Count issue interaction attempt
 
@@ -869,30 +885,30 @@ def review(
                             # Move to next issue
 
                     # --- After Issue Loop for Repo ---
-                    if not repo_level_skip:
-                        # If we processed all issues without skipping the repo
-                        data["reviewed"] = True
-                        if "denied" in data:
-                            del data["denied"]  # Clean legacy flag
-                        print(f"  [green]Repo {repo_name} fully reviewed.[/green]")
-                        repos_marked_reviewed_this_session += 1
-                        repo_processed_this_line = True  # Mark repo as processed
-                    elif repo_skipped_this_line:
-                        # If repo was skipped ('sr' or 'sa'), write original line back
-                        # Need to reload original line data if 'sa' was triggered mid-repo
-                        # For simplicity, we'll just write the current 'data' state which might have partial denials
-                        # A better approach might be needed if perfect rollback on 'sr'/'sa' is required
+                    if repo_level_skip:  # Handle sr, sa first
                         print(f"  Repo {repo_name} skipped.")
                         # Write potentially modified data (if some issues were denied before skip)
                         json.dump(data, outfile)
                         outfile.write("\n")
-                        continue  # Go to next line in file
+                        # No need to mark as reviewed if skipped mid-way
+                        # repos_skipped_count is incremented where sr/sa is handled
+                        break  # Exit the outer loop for this repo (already done by sr/sa logic)
 
-                    # Write final state of data for this repo (potentially modified issues, reviewed=True)
+                    # If we reach here, the inner loop completed without sr/sa
+                    # Mark repo as reviewed only if we didn't skip it
+                    data["reviewed"] = True
+                    if "denied" in data:
+                        del data["denied"]  # Clean legacy flag
+                    print(f"  [green]Repo {repo_name} fully reviewed.[/green]")
+                    repos_marked_reviewed_this_session += 1
+                    repo_processed_this_line = True  # Mark repo as processed
+
+                    # Write final state of data for this repo (reviewed=True)
                     json.dump(data, outfile)
                     outfile.write("\n")
+                    # repo_processed_this_line is already True
 
-                # Catch specific expected errors during processing, let SystemExit/typer.Exit pass through
+                # --- Inner Try/Except/Finally for processing a single line ---
                 except (
                     json.JSONDecodeError,
                     KeyError,
@@ -904,32 +920,38 @@ def review(
                     )
                     error_count += 1
                     outfile.write(line + "\n")  # Write original line back
-                finally:
+                finally:  # Belongs to the inner try (line 718)
                     # Increment repo processed count if it wasn't skipped and didn't error before processing
                     if repo_processed_this_line and not repo_skipped_this_line:
                         repos_processed_count += 1
+            # --- End of File Loop (inside 'with' blocks) ---
 
-        # --- End of File Loop ---
+            # --- Final operations after loop (still inside main 'try') ---
+            # If loop finished OR exited via 'q', save progress by moving temp file
+            # This needs to be inside the main try block to be caught by outer except/finally
+            shutil.move(str(temp_output_path), str(cache_file))
+            print("\n[bold green]Review process finished.[/bold green]")
+            if skip_all_remaining:
+                print("  (Skipped remaining items as requested)")
+            print("--- Summary ---")
+            print(f"  Total lines in file: {total_lines}")
+            print(
+                f"  Repos skipped (already reviewed/denied/sr/sa): {repos_skipped_count}"
+            )
+            print(
+                f"  Repos newly marked as reviewed: {repos_marked_reviewed_this_session}"
+            )
+            print(f"  Total issues reviewed (approved/denied): {issues_reviewed_count}")
+            print(f"  Issues denied: {issues_denied_count}")  # Updated label
+            print(f"  Issues skipped ('s' action): {issues_skipped_count}")
+            print(f"  Lines with errors: {error_count}")
+            print(f"Updated cache file: {cache_file}")
 
-        # If loop finished OR exited via 'q', save progress by moving temp file
-        shutil.move(str(temp_output_path), str(cache_file))
-        print("\n[bold green]Review process finished.[/bold green]")
-        if skip_all_remaining:
-            print("  (Skipped remaining items as requested)")
-        print("--- Summary ---")
-        print(f"  Total lines in file: {total_lines}")
-        print(f"  Repos skipped (already reviewed/denied/sr/sa): {repos_skipped_count}")
-        print(f"  Repos newly marked as reviewed: {repos_marked_reviewed_this_session}")
-        print(f"  Total issues reviewed (approved/denied): {issues_reviewed_count}")
-        print(f"  Issues denied: {issues_denied_count}")  # Updated label
-        print(f"  Issues skipped ('s' action): {issues_skipped_count}")
-        print(f"  Lines with errors: {error_count}")
-        print(f"Updated cache file: {cache_file}")
-
-    except typer.Exit as e:
+    # --- Outer Try/Except/Finally for the whole command ---
+    except typer.Exit as e:  # Correct indentation
         # Handle graceful exit via 'q' or other Exit calls
         # Check if the Exit exception has a code attribute
-        exit_code = getattr(e, "code", 0) # Default to 0 if no code attribute
+        exit_code = getattr(e, "code", 0)  # Default to 0 if no code attribute
 
         if exit_code == 0:
             print("Exited review process cleanly.")
@@ -941,7 +963,7 @@ def review(
         # Note: The finally block in the outer try/except/finally structure
         # should handle the file move correctly even on Exit.
 
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:  # Correct indentation
         print("\n[bold magenta]Keyboard interrupt detected. Saving progress...[/]")
         # Attempt to save progress by moving temp file if it exists
         if temp_output_path.exists():
@@ -954,7 +976,7 @@ def review(
         else:
             print("No temporary file found to save.")
         raise typer.Exit(code=130)  # Standard exit code for Ctrl+C
-    except Exception as e:
+    except Exception as e:  # Correct indentation
         print(f"\n[bold red]An error occurred during review: {e}[/]")
         traceback.print_exc()
         # Attempt cleanup, but prioritize not losing data
@@ -969,7 +991,7 @@ def review(
             # except Exception as del_err:
             #     print(f"[yellow]Warning:[/yellow] Could not delete temporary file {temp_output_path} after error: {del_err}")
         raise typer.Exit(code=1)
-    finally:
+    finally:  # Correct indentation
         # Ensure temp file is removed *only if it wasn't successfully moved* and *no major error occurred*
         # This logic is tricky. Let's be conservative and leave the temp file if the move didn't happen
         # unless it was explicitly handled (like in KeyboardInterrupt or normal exit).
@@ -978,5 +1000,5 @@ def review(
         pass  # Simplified cleanup logic - rely on move happening correctly
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # Correct indentation
     app()
