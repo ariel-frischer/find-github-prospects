@@ -63,7 +63,13 @@ Finds repositories matching your criteria and saves the raw data to a JSON cache
     *   `--min-stars` / `-s` INTEGER: Minimum number of stars a repository must have (default: 20).
     *   `--recent-days` / `-d` INTEGER: Maximum number of days since the last push activity (default: 365).
     *   `--cache-file` / `-c` PATH: Path to save the output JSON Lines cache file. If not specified, a filename is generated based on the search parameters (label, language, stars, days) in the `cache/` directory (e.g., `cache/raw_repos_label_good_first_issue_lang_python_stars_20_days_365.jsonl`). If the file already exists, new results are appended, skipping duplicates.
+    *   `--max-issue-age-days` INTEGER: Only find repos where at least one matching issue was created within this many days (optional).
+    *   `--max-linked-prs` INTEGER: Only find repos where at least one matching issue has this many or fewer linked pull requests (optional).
     *   `--use-browser-checker`: Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.
+*   **Example with detailed filters:** Find Python repos with "help wanted" issues created in the last 30 days that have 0 linked PRs:
+    ```bash
+    repobird-leadgen search --label "good first issue" --language python --max-issue-age-days 30 --max-linked-prs 0
+    ```
 
 **2. `enrich`**
 

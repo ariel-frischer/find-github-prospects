@@ -30,8 +30,8 @@ run:
 
 # Run an example search command using the browser checker
 run-browser: install-browsers
-	@echo "Running example search (Browser, last 10 days, min 200 stars)..."
-	@$(VENV_RUN) repobird-leadgen search --label "good first issue" --language python --max-results 10 --recent-days 10 --min-stars 200 --use-browser-checker
+	@echo "Running example search (Browser, label 'good first issue', lang python, max 10 results, recent 10 days, min 100 stars, max issue age 30 days, max 0 linked PRs)..."
+	@$(VENV_RUN) repobird-leadgen search --label "good first issue" --language python --max-results 10 --recent-days 30 --min-stars 100 --max-issue-age-days 30 --max-linked-prs 0 --use-browser-checker
 
 # Update a specific cache file with missing issue numbers (requires label)
 # Example: make update-cache CACHE_FILE=cache/raw_repos_label_good_first_issue_lang_python_stars_200_days_10.jsonl LABEL="good first issue"
