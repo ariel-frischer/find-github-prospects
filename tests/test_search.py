@@ -1,26 +1,28 @@
 import pytest
-from unittest.mock import MagicMock, patch, call, mock_open # Added mock_open
+from unittest.mock import MagicMock, patch, call, mock_open  # Added mock_open
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
-import copy # For deep copying repo data
+import copy  # For deep copying repo data
 
 from github import (
     Github,
     Auth,
     RateLimitExceededException,
-    UnknownObjectException,
     GithubException,
 )
 from github.Repository import Repository
 from github.ContentFile import ContentFile
 from github.PaginatedList import PaginatedList
 from github.Issue import Issue
-from github.TimelineEvent import TimelineEvent # Added
+from github.TimelineEvent import TimelineEvent  # Added
 
 # Import the class from the module under test for patching if needed
 from repobird_leadgen.github_search import GitHubSearcher
-from repobird_leadgen.config import GITHUB_TOKEN, CACHE_DIR # Keep for integration tests
+from repobird_leadgen.config import (
+    GITHUB_TOKEN,
+    CACHE_DIR,
+)  # Keep for integration tests
 
 # Basic check to skip tests if no token is available
 # Apply only to integration tests now
@@ -28,6 +30,7 @@ REASON_NO_TOKEN = "Skipping integration test: GITHUB_TOKEN not set in environmen
 skip_if_no_token = pytest.mark.skipif(not GITHUB_TOKEN, reason=REASON_NO_TOKEN)
 
 # --- Fixtures ---
+
 
 @pytest.fixture
 def mock_auth(mocker):
@@ -51,13 +54,15 @@ def mock_github(mocker):
     mock_instance.search_repositories.return_value = mock_search_repos_results
 
     mock_search_issues_results = MagicMock(spec=PaginatedList)
-    mock_search_issues_results.totalCount = 0 # Default for API label check
+    mock_search_issues_results.totalCount = 0  # Default for API label check
     mock_instance.search_issues.return_value = mock_search_issues_results
 
     mock_rate_limit_info = MagicMock()
     mock_rate_limit_info.search = MagicMock()
-    mock_rate_limit_info.search.reset = datetime.now(timezone.utc) + timedelta(seconds=10)
-    mock_rate_limit_info.core = MagicMock() # Add core limit mock
+    mock_rate_limit_info.search.reset = datetime.now(timezone.utc) + timedelta(
+        seconds=10
+    )
+    mock_rate_limit_info.core = MagicMock()  # Add core limit mock
     mock_rate_limit_info.core.reset = datetime.now(timezone.utc) + timedelta(seconds=10)
     mock_instance.get_rate_limit.return_value = mock_rate_limit_info
 
@@ -73,6 +78,7 @@ def mock_github(mocker):
         "rate_limit_info": mock_rate_limit_info,
     }
 
+
 @pytest.fixture
 def mock_repo_data():
     """Provides data for a mock Repository object."""
@@ -86,7 +92,9 @@ def mock_repo_data():
         "topics": ["python", "test"],
         "pushed_at": now,
         "owner": MagicMock(login="test_owner", type="User"),
-        "raw_data": {'initial_key': 'initial_value'}, # Add raw_data for storing found issues
+        "raw_data": {
+            "initial_key": "initial_value"
+        },  # Add raw_data for storing found issues
     }
 
 
@@ -111,10 +119,12 @@ def mock_repository(mocker, mock_repo_data):
 
     return mock_repo
 
+
 @pytest.fixture
 def mock_issue(mocker):
     """Creates a basic mock Issue object."""
-    def _create_mock_issue(number, created_at_dt): # Renamed dt
+
+    def _create_mock_issue(number, created_at_dt):  # Renamed dt
         issue = MagicMock(spec=Issue)
         issue.number = number
         issue.created_at = created_at_dt
@@ -123,11 +133,14 @@ def mock_issue(mocker):
         mock_timeline_paginator.__iter__.return_value = iter([])
         issue.get_timeline.return_value = mock_timeline_paginator
         return issue
+
     return _create_mock_issue
+
 
 @pytest.fixture
 def mock_timeline_event(mocker):
     """Creates a mock TimelineEvent object, simulating a linked PR."""
+
     def _create_mock_event(is_pr=True):
         event = MagicMock(spec=TimelineEvent)
         event.event = "cross-referenced"
@@ -136,13 +149,17 @@ def mock_timeline_event(mocker):
         # Simulate a linked PR vs. a linked issue
         event.source.issue.pull_request = {} if is_pr else None
         return event
+
     return _create_mock_event
+
 
 @pytest.fixture
 def mock_filesystem(mocker):
     """Mocks Path and file operations, handling the / operator and Path.open."""
     mock_path_instance_initial = MagicMock(spec=Path, name="Path_initial_instance")
-    mock_path_instance_final = MagicMock(spec=Path, name="Path_final_instance") # Result after division
+    mock_path_instance_final = MagicMock(
+        spec=Path, name="Path_final_instance"
+    )  # Result after division
 
     # Configure the initial instance's division operator
     mock_path_instance_initial.__truediv__.return_value = mock_path_instance_final
@@ -152,14 +169,18 @@ def mock_filesystem(mocker):
     mock_path_instance_final.exists.return_value = False
     mock_path_instance_final.parent = MagicMock(spec=Path, name="Path_final_parent")
     mock_path_instance_final.parent.mkdir = MagicMock(name="Path_final_parent_mkdir")
-    mock_path_instance_final.__str__.return_value = "/fake/cache/issue_label_cache.jsonl"
+    mock_path_instance_final.__str__.return_value = (
+        "/fake/cache/issue_label_cache.jsonl"
+    )
 
     # Mock the open method ON the final Path instance for issue cache writing
     mock_issue_cache_open_func = mock_open()
     mock_path_instance_final.open = mock_issue_cache_open_func
 
     # Patch the Path CLASS to return the initial instance
-    mock_path_class = mocker.patch("repobird_leadgen.github_search.Path", return_value=mock_path_instance_initial)
+    mock_path_class = mocker.patch(
+        "repobird_leadgen.github_search.Path", return_value=mock_path_instance_initial
+    )
 
     # Mock for the *main* cache file passed into search()
     # This needs to be a separate mock Path object
@@ -174,13 +195,14 @@ def mock_filesystem(mocker):
         "PathClass": mock_path_class,
         "PathInitialInstance": mock_path_instance_initial,
         "IssueCachePath": mock_path_instance_final,
-        "IssueCacheOpenFunc": mock_issue_cache_open_func, # The mock for Path(...).open
+        "IssueCacheOpenFunc": mock_issue_cache_open_func,  # The mock for Path(...).open
         "MainCachePath": mock_main_cache_path,
-        "MainCacheOpenFunc": mock_main_cache_open_func # The mock for Path(...).open
+        "MainCacheOpenFunc": mock_main_cache_open_func,  # The mock for Path(...).open
     }
 
 
 # --- Unit Tests ---
+
 
 @pytest.mark.unit
 def test_github_searcher_init(mock_auth, mock_github, mock_filesystem):
@@ -190,21 +212,30 @@ def test_github_searcher_init(mock_auth, mock_github, mock_filesystem):
 
     mock_auth["class_patch"].assert_called_once_with(token)
     mock_github["constructor_patch"].assert_called_once_with(
-        auth=mock_auth["instance"], per_page=100, retry=5, timeout=30 # Updated timeout
+        auth=mock_auth["instance"],
+        per_page=100,
+        retry=5,
+        timeout=30,  # Updated timeout
     )
     assert searcher.gh is mock_github["instance"]
     # Check that the Path class was called (with CACHE_DIR)
     mock_filesystem["PathClass"].assert_called_once_with(CACHE_DIR)
     # Check that the division operator was called on the initial instance
-    mock_filesystem["PathInitialInstance"].__truediv__.assert_called_once_with("issue_label_cache.jsonl")
+    mock_filesystem["PathInitialInstance"].__truediv__.assert_called_once_with(
+        "issue_label_cache.jsonl"
+    )
     # Check cache loading attempt (exists call on the FINAL instance)
     mock_filesystem["IssueCachePath"].exists.assert_called_once()
     # Check if Path(...).open was called for loading cache (it shouldn't be if exists() is false)
-    mock_filesystem["IssueCacheOpenFunc"].assert_not_called() # Should not be called if exists=False
+    mock_filesystem[
+        "IssueCacheOpenFunc"
+    ].assert_not_called()  # Should not be called if exists=False
 
 
 @pytest.mark.unit
-def test_build_repo_query(mocker, mock_auth, mock_github, mock_filesystem): # Need fixtures for init
+def test_build_repo_query(
+    mocker, mock_auth, mock_github, mock_filesystem
+):  # Need fixtures for init
     """Tests the _build_repo_query method."""
     fixed_now = datetime(2024, 1, 31, 12, 0, 0, tzinfo=timezone.utc)
     # Patch datetime only within the SUT module to avoid affecting other tests if they use real datetime
@@ -225,60 +256,85 @@ def test_build_repo_query(mocker, mock_auth, mock_github, mock_filesystem): # Ne
 
 
 @pytest.mark.unit
-def test_has_open_issue_with_label_api_true(mock_auth, mock_github, mock_repository, mock_filesystem):
+def test_has_open_issue_with_label_api_true(
+    mock_auth, mock_github, mock_repository, mock_filesystem
+):
     """Tests _has_open_issue_with_label_api when an issue exists."""
     searcher = GitHubSearcher(token="dummy")
-    mock_github["search_issues_results"].totalCount = 1 # Simulate finding an issue
+    mock_github["search_issues_results"].totalCount = 1  # Simulate finding an issue
     repo = mock_repository
     label = "bug"
 
     # Mock _execute_with_retry to just return the result of the function call
-    searcher._execute_with_retry = MagicMock(side_effect=lambda func, *args, **kwargs: func(*args, **kwargs))
+    searcher._execute_with_retry = MagicMock(
+        side_effect=lambda func, *args, **kwargs: func(*args, **kwargs)
+    )
 
     result = searcher._has_open_issue_with_label_api(repo, label)
 
     assert result is True
     expected_query = f"repo:{repo.full_name} is:issue is:open label:{label}"
     # Check that _execute_with_retry was called with the correct args
-    searcher._execute_with_retry.assert_called_once_with(mock_github["instance"].search_issues, query=expected_query)
+    searcher._execute_with_retry.assert_called_once_with(
+        mock_github["instance"].search_issues, query=expected_query
+    )
+
 
 @pytest.mark.unit
-def test_has_open_issue_with_label_api_false(mock_auth, mock_github, mock_repository, mock_filesystem):
+def test_has_open_issue_with_label_api_false(
+    mock_auth, mock_github, mock_repository, mock_filesystem
+):
     """Tests _has_open_issue_with_label_api when no issue exists."""
     searcher = GitHubSearcher(token="dummy")
-    mock_github["search_issues_results"].totalCount = 0 # Simulate finding no issues
+    mock_github["search_issues_results"].totalCount = 0  # Simulate finding no issues
     repo = mock_repository
     label = "feature"
 
-    searcher._execute_with_retry = MagicMock(side_effect=lambda func, *args, **kwargs: func(*args, **kwargs))
+    searcher._execute_with_retry = MagicMock(
+        side_effect=lambda func, *args, **kwargs: func(*args, **kwargs)
+    )
 
     result = searcher._has_open_issue_with_label_api(repo, label)
 
     assert result is False
     expected_query = f"repo:{repo.full_name} is:issue is:open label:{label}"
-    searcher._execute_with_retry.assert_called_once_with(mock_github["instance"].search_issues, query=expected_query)
+    searcher._execute_with_retry.assert_called_once_with(
+        mock_github["instance"].search_issues, query=expected_query
+    )
+
 
 @pytest.mark.unit
-def test_has_open_issue_with_label_api_quoted(mock_auth, mock_github, mock_repository, mock_filesystem):
+def test_has_open_issue_with_label_api_quoted(
+    mock_auth, mock_github, mock_repository, mock_filesystem
+):
     """Tests _has_open_issue_with_label_api with a label containing spaces."""
     searcher = GitHubSearcher(token="dummy")
     mock_github["search_issues_results"].totalCount = 1
     repo = mock_repository
     label = "good first issue"
 
-    searcher._execute_with_retry = MagicMock(side_effect=lambda func, *args, **kwargs: func(*args, **kwargs))
+    searcher._execute_with_retry = MagicMock(
+        side_effect=lambda func, *args, **kwargs: func(*args, **kwargs)
+    )
 
     result = searcher._has_open_issue_with_label_api(repo, label)
 
     assert result is True
-    expected_query = f'repo:{repo.full_name} is:issue is:open label:"{label}"' # Note the quotes
-    searcher._execute_with_retry.assert_called_once_with(mock_github["instance"].search_issues, query=expected_query)
+    expected_query = (
+        f'repo:{repo.full_name} is:issue is:open label:"{label}"'  # Note the quotes
+    )
+    searcher._execute_with_retry.assert_called_once_with(
+        mock_github["instance"].search_issues, query=expected_query
+    )
 
 
 # --- Tests for _get_linked_prs_count --- #
 
+
 @pytest.mark.unit
-def test_get_linked_prs_count_zero(mocker, mock_auth, mock_github, mock_issue, mock_timeline_event, mock_filesystem):
+def test_get_linked_prs_count_zero(
+    mocker, mock_auth, mock_github, mock_issue, mock_timeline_event, mock_filesystem
+):
     """Tests counting zero linked PRs."""
     searcher = GitHubSearcher(token="dummy")
     now = datetime.now(timezone.utc)
@@ -288,7 +344,9 @@ def test_get_linked_prs_count_zero(mocker, mock_auth, mock_github, mock_issue, m
     event_linked_issue = mock_timeline_event(is_pr=False)
     # Mock the paginator returned by get_timeline
     mock_timeline_paginator = MagicMock(spec=PaginatedList)
-    mock_timeline_paginator.__iter__.return_value = iter([event_other, event_linked_issue])
+    mock_timeline_paginator.__iter__.return_value = iter(
+        [event_other, event_linked_issue]
+    )
     issue.get_timeline.return_value = mock_timeline_paginator
 
     # Mock _execute_with_retry to return the paginator
@@ -299,8 +357,11 @@ def test_get_linked_prs_count_zero(mocker, mock_auth, mock_github, mock_issue, m
     assert count == 0
     searcher._execute_with_retry.assert_called_once_with(issue.get_timeline)
 
+
 @pytest.mark.unit
-def test_get_linked_prs_count_two(mocker, mock_auth, mock_github, mock_issue, mock_timeline_event, mock_filesystem):
+def test_get_linked_prs_count_two(
+    mocker, mock_auth, mock_github, mock_issue, mock_timeline_event, mock_filesystem
+):
     """Tests counting two linked PRs."""
     searcher = GitHubSearcher(token="dummy")
     now = datetime.now(timezone.utc)
@@ -311,7 +372,9 @@ def test_get_linked_prs_count_two(mocker, mock_auth, mock_github, mock_issue, mo
     event_linked_issue = mock_timeline_event(is_pr=False)
 
     mock_timeline_paginator = MagicMock(spec=PaginatedList)
-    mock_timeline_paginator.__iter__.return_value = iter([event_pr1, event_comment, event_pr2, event_linked_issue])
+    mock_timeline_paginator.__iter__.return_value = iter(
+        [event_pr1, event_comment, event_pr2, event_linked_issue]
+    )
     issue.get_timeline.return_value = mock_timeline_paginator
 
     searcher._execute_with_retry = MagicMock(return_value=mock_timeline_paginator)
@@ -321,8 +384,11 @@ def test_get_linked_prs_count_two(mocker, mock_auth, mock_github, mock_issue, mo
     assert count == 2
     searcher._execute_with_retry.assert_called_once_with(issue.get_timeline)
 
+
 @pytest.mark.unit
-def test_get_linked_prs_count_error(mocker, mock_auth, mock_github, mock_issue, mock_filesystem):
+def test_get_linked_prs_count_error(
+    mocker, mock_auth, mock_github, mock_issue, mock_filesystem
+):
     """Tests error handling during timeline fetch."""
     searcher = GitHubSearcher(token="dummy")
     now = datetime.now(timezone.utc)
@@ -332,13 +398,17 @@ def test_get_linked_prs_count_error(mocker, mock_auth, mock_github, mock_issue, 
 
     count = searcher._get_linked_prs_count(issue)
 
-    assert count == -1 # Error indicator
+    assert count == -1  # Error indicator
     searcher._execute_with_retry.assert_called_once_with(issue.get_timeline)
+
 
 # --- Tests for _find_qualifying_issues --- #
 
+
 @pytest.mark.unit
-def test_find_qualifying_issues_no_filters(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_no_filters(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests qualification with no age/PR filters (should qualify if any issue found)."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -354,15 +424,20 @@ def test_find_qualifying_issues_no_filters(mocker, mock_auth, mock_github, mock_
     result = searcher._find_qualifying_issues(repo, "bug", None, None)
 
     assert result is True
-    searcher._execute_with_retry.assert_called_once_with(repo.get_issues, state="open", labels=["bug"])
+    searcher._execute_with_retry.assert_called_once_with(
+        repo.get_issues, state="open", labels=["bug"]
+    )
+
 
 @pytest.mark.unit
-def test_find_qualifying_issues_no_issues_found(mocker, mock_auth, mock_github, mock_repository, mock_filesystem):
+def test_find_qualifying_issues_no_issues_found(
+    mocker, mock_auth, mock_github, mock_repository, mock_filesystem
+):
     """Tests when get_issues returns no issues."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
     mock_issues_paginator = MagicMock(spec=PaginatedList)
-    mock_issues_paginator.__iter__.return_value = iter([]) # No issues
+    mock_issues_paginator.__iter__.return_value = iter([])  # No issues
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
@@ -370,10 +445,15 @@ def test_find_qualifying_issues_no_issues_found(mocker, mock_auth, mock_github, 
     result = searcher._find_qualifying_issues(repo, "bug", None, None)
 
     assert result is False
-    searcher._execute_with_retry.assert_called_once_with(repo.get_issues, state="open", labels=["bug"])
+    searcher._execute_with_retry.assert_called_once_with(
+        repo.get_issues, state="open", labels=["bug"]
+    )
+
 
 @pytest.mark.unit
-def test_find_qualifying_issues_age_met(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_age_met(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests qualification when issue meets the max age criteria."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -381,7 +461,7 @@ def test_find_qualifying_issues_age_met(mocker, mock_auth, mock_github, mock_rep
     # Patch datetime within the SUT module
     mock_dt = mocker.patch("repobird_leadgen.github_search.datetime")
     mock_dt.now.return_value = fixed_now
-    mock_dt.timedelta = timedelta # Keep timedelta working
+    mock_dt.timedelta = timedelta  # Keep timedelta working
 
     issue_young = mock_issue(102, fixed_now - timedelta(days=5))
     mock_issues_paginator = MagicMock(spec=PaginatedList)
@@ -390,13 +470,18 @@ def test_find_qualifying_issues_age_met(mocker, mock_auth, mock_github, mock_rep
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
 
-    result = searcher._find_qualifying_issues(repo, "bug", 10, None) # Max 10 days old
+    result = searcher._find_qualifying_issues(repo, "bug", 10, None)  # Max 10 days old
 
     assert result is True
-    searcher._execute_with_retry.assert_called_once_with(repo.get_issues, state="open", labels=["bug"])
+    searcher._execute_with_retry.assert_called_once_with(
+        repo.get_issues, state="open", labels=["bug"]
+    )
+
 
 @pytest.mark.unit
-def test_find_qualifying_issues_age_not_met(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_age_not_met(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests non-qualification when issue is older than max age."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -412,13 +497,18 @@ def test_find_qualifying_issues_age_not_met(mocker, mock_auth, mock_github, mock
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
 
-    result = searcher._find_qualifying_issues(repo, "bug", 10, None) # Max 10 days old
+    result = searcher._find_qualifying_issues(repo, "bug", 10, None)  # Max 10 days old
 
     assert result is False
-    searcher._execute_with_retry.assert_called_once_with(repo.get_issues, state="open", labels=["bug"])
+    searcher._execute_with_retry.assert_called_once_with(
+        repo.get_issues, state="open", labels=["bug"]
+    )
+
 
 @pytest.mark.unit
-def test_find_qualifying_issues_pr_met(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_pr_met(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests qualification when issue meets the max linked PR criteria."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -435,7 +525,7 @@ def test_find_qualifying_issues_pr_met(mocker, mock_auth, mock_github, mock_repo
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", None, 2) # Max 2 PRs
+    result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
 
     assert result is True
     # _execute_with_retry is called for get_issues AND potentially for get_timeline inside _get_linked_prs_count
@@ -443,8 +533,11 @@ def test_find_qualifying_issues_pr_met(mocker, mock_auth, mock_github, mock_repo
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     searcher._get_linked_prs_count.assert_called_once_with(issue1)
 
+
 @pytest.mark.unit
-def test_find_qualifying_issues_pr_not_met(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_pr_not_met(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests non-qualification when issue has too many linked PRs."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -458,20 +551,23 @@ def test_find_qualifying_issues_pr_not_met(mocker, mock_auth, mock_github, mock_
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", None, 2) # Max 2 PRs
+    result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
 
     assert result is False
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     searcher._get_linked_prs_count.assert_called_once_with(issue1)
 
+
 @pytest.mark.unit
-def test_find_qualifying_issues_pr_count_error(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_pr_count_error(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests skipping issue if PR count fails."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
     now = datetime.now(timezone.utc)
     issue1 = mock_issue(106, now)
-    issue2 = mock_issue(107, now) # Add a second issue that might qualify
+    issue2 = mock_issue(107, now)  # Add a second issue that might qualify
 
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue1, issue2])
@@ -482,15 +578,18 @@ def test_find_qualifying_issues_pr_count_error(mocker, mock_auth, mock_github, m
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", None, 2) # Max 2 PRs
+    result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
 
-    assert result is True # Should qualify based on issue2
+    assert result is True  # Should qualify based on issue2
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     assert searcher._get_linked_prs_count.call_count == 2
     searcher._get_linked_prs_count.assert_has_calls([call(issue1), call(issue2)])
 
+
 @pytest.mark.unit
-def test_find_qualifying_issues_age_and_pr_met(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_age_and_pr_met(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests qualification when both age and PR criteria are met."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -508,14 +607,19 @@ def test_find_qualifying_issues_age_and_pr_met(mocker, mock_auth, mock_github, m
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", 10, 2) # Max 10 days, Max 2 PRs
+    result = searcher._find_qualifying_issues(
+        repo, "bug", 10, 2
+    )  # Max 10 days, Max 2 PRs
 
     assert result is True
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     searcher._get_linked_prs_count.assert_called_once_with(issue_good)
 
+
 @pytest.mark.unit
-def test_find_qualifying_issues_age_fail_pr_met(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_age_fail_pr_met(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests non-qualification when age fails but PRs are okay."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -533,14 +637,19 @@ def test_find_qualifying_issues_age_fail_pr_met(mocker, mock_auth, mock_github, 
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", 10, 2) # Max 10 days, Max 2 PRs
+    result = searcher._find_qualifying_issues(
+        repo, "bug", 10, 2
+    )  # Max 10 days, Max 2 PRs
 
     assert result is False
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
-    searcher._get_linked_prs_count.assert_not_called() # Should not be called if age fails first
+    searcher._get_linked_prs_count.assert_not_called()  # Should not be called if age fails first
+
 
 @pytest.mark.unit
-def test_find_qualifying_issues_age_met_pr_fail(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_age_met_pr_fail(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests non-qualification when age is okay but PRs fail."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -558,14 +667,19 @@ def test_find_qualifying_issues_age_met_pr_fail(mocker, mock_auth, mock_github, 
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", 10, 2) # Max 10 days, Max 2 PRs
+    result = searcher._find_qualifying_issues(
+        repo, "bug", 10, 2
+    )  # Max 10 days, Max 2 PRs
 
     assert result is False
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     searcher._get_linked_prs_count.assert_called_once_with(issue_young)
 
+
 @pytest.mark.unit
-def test_find_qualifying_issues_multiple_issues_one_qualifies(mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem):
+def test_find_qualifying_issues_multiple_issues_one_qualifies(
+    mocker, mock_auth, mock_github, mock_repository, mock_issue, mock_filesystem
+):
     """Tests finding one qualifying issue among several non-qualifying ones."""
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
@@ -580,9 +694,9 @@ def test_find_qualifying_issues_multiple_issues_one_qualifies(mocker, mock_auth,
     issue_also_old = mock_issue(204, fixed_now - timedelta(days=30))
 
     mock_issues_paginator = MagicMock(spec=PaginatedList)
-    mock_issues_paginator.__iter__.return_value = iter([
-        issue_old, issue_many_prs, issue_good, issue_also_old
-    ])
+    mock_issues_paginator.__iter__.return_value = iter(
+        [issue_old, issue_many_prs, issue_good, issue_also_old]
+    )
     repo.get_issues.return_value = mock_issues_paginator
 
     # Mock _get_linked_prs_count: called for 202 (returns 3), called for 203 (returns 1)
@@ -590,22 +704,28 @@ def test_find_qualifying_issues_multiple_issues_one_qualifies(mocker, mock_auth,
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", 15, 2) # Max 15 days, Max 2 PRs
+    result = searcher._find_qualifying_issues(
+        repo, "bug", 15, 2
+    )  # Max 15 days, Max 2 PRs
 
-    assert result is True # Should qualify based on issue_good
+    assert result is True  # Should qualify based on issue_good
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
     # Check PR count calls: Should be called for issue_many_prs (age ok) and issue_good (age ok)
     assert searcher._get_linked_prs_count.call_count == 2
-    searcher._get_linked_prs_count.assert_has_calls([call(issue_many_prs), call(issue_good)])
+    searcher._get_linked_prs_count.assert_has_calls(
+        [call(issue_many_prs), call(issue_good)]
+    )
+
 
 # --- Tests for search method with filters --- #
+
 
 # Helper fixture to set up mocks for the search method tests
 # Parametrized to control issue cache state ('miss', 'hit_true', 'hit_false')
 @pytest.fixture(params=["miss", "hit_true", "hit_false"])
 def mock_search_flow(mocker, mock_github, mock_repository, mock_filesystem, request):
     issue_cache_state = request.param
-    label_used_in_test = "feature" # Label used in the search tests
+    label_used_in_test = "feature"  # Label used in the search tests
 
     searcher = GitHubSearcher(token="dummy")
     repo1 = mock_repository
@@ -615,7 +735,10 @@ def mock_search_flow(mocker, mock_github, mock_repository, mock_filesystem, requ
     searcher.issue_cache = {}
     # Configure issue cache based on state parameter
     if issue_cache_state == "hit_true":
-        searcher.issue_cache[cache_key] = (True, [{"url": "dummy_url"}]) # Value doesn't matter much, just existence
+        searcher.issue_cache[cache_key] = (
+            True,
+            [{"url": "dummy_url"}],
+        )  # Value doesn't matter much, just existence
     elif issue_cache_state == "hit_false":
         searcher.issue_cache[cache_key] = (False, [])
     # 'miss' state: searcher.issue_cache is empty
@@ -626,9 +749,13 @@ def mock_search_flow(mocker, mock_github, mock_repository, mock_filesystem, requ
 
     # Mock internal methods (can be overridden in tests)
     # Simulate API check returning True by default for cache miss scenario (for non-filter tests)
-    mock_initial_check = mocker.patch.object(searcher, '_has_open_issue_with_label_api', return_value=True)
+    mock_initial_check = mocker.patch.object(
+        searcher, "_has_open_issue_with_label_api", return_value=True
+    )
     # Simulate detailed check returning True by default
-    mock_detailed_check = mocker.patch.object(searcher, '_find_qualifying_issues', return_value=True)
+    mock_detailed_check = mocker.patch.object(
+        searcher, "_find_qualifying_issues", return_value=True
+    )
 
     # Mock _execute_with_retry
     def execute_side_effect(func, *args, **kwargs):
@@ -647,7 +774,10 @@ def mock_search_flow(mocker, mock_github, mock_repository, mock_filesystem, requ
         else:
             # Default pass-through for other unmocked API calls if needed
             return func(*args, **kwargs)
-    mock_execute = mocker.patch.object(searcher, '_execute_with_retry', side_effect=execute_side_effect)
+
+    mock_execute = mocker.patch.object(
+        searcher, "_execute_with_retry", side_effect=execute_side_effect
+    )
 
     # Get mock Path objects and open mocks from filesystem fixture
     mock_issue_cache_path = mock_filesystem["IssueCachePath"]
@@ -671,11 +801,14 @@ def mock_search_flow(mocker, mock_github, mock_repository, mock_filesystem, requ
         "mock_main_cache_open_func": mock_main_cache_open_func,
         "mock_json_dump": mock_json_dump,
         "issue_cache_state": issue_cache_state,
-        "cache_key": cache_key
+        "cache_key": cache_key,
     }
 
+
 # Helper function to assert issue cache dump call
-def assert_issue_cache_dump(mock_json_dump, repo_full_name, label, expected_has_label, handle):
+def assert_issue_cache_dump(
+    mock_json_dump, repo_full_name, label, expected_has_label, handle
+):
     # Find the call related to the issue cache
     issue_cache_call = None
     for c in mock_json_dump.call_args_list:
@@ -683,12 +816,15 @@ def assert_issue_cache_dump(mock_json_dump, repo_full_name, label, expected_has_
         if isinstance(args[0], dict) and args[0].get("repo") == repo_full_name:
             issue_cache_call = c
             break
-    assert issue_cache_call is not None, f"Issue cache dump call not found for {repo_full_name}"
+    assert (
+        issue_cache_call is not None
+    ), f"Issue cache dump call not found for {repo_full_name}"
     args, _ = issue_cache_call
     assert args[0]["repo"] == repo_full_name
     assert args[0]["label"] == label
     assert args[0]["has_label"] is expected_has_label
     assert args[1] is handle, "Issue cache dump handle mismatch"
+
 
 @pytest.mark.unit
 @patch("repobird_leadgen.github_search.tqdm", MagicMock())
@@ -703,7 +839,7 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
     mock_main_cache_open_func = mock_search_flow["mock_main_cache_open_func"]
     mock_issue_cache_open_func = mock_search_flow["mock_issue_cache_open_func"]
     mock_json_dump = mock_search_flow["mock_json_dump"]
-    issue_cache_state = mock_search_flow["issue_cache_state"]
+    # issue_cache_state = mock_search_flow["issue_cache_state"] # Removed F841
 
     # Mock detailed check to return True
     mock_search_flow["mock_detailed_check"].return_value = True
@@ -711,16 +847,18 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
 
     # Determine expected results based on OBSERVED SUT behavior for filters:
     # It runs detailed check regardless of cache state (unless detailed check itself returns false)
-    expected_results = 1 # Always expect 1 if detailed check passes
+    expected_results = 1  # Always expect 1 if detailed check passes
 
-    results = list(searcher.search(
-        label=label,
-        language="go",
-        max_issue_age_days=max_age,
-        max_linked_prs=max_prs,
-        cache_file=mock_main_cache_path,
-        existing_repo_names=set(),
-    ))
+    results = list(
+        searcher.search(
+            label=label,
+            language="go",
+            max_issue_age_days=max_age,
+            max_linked_prs=max_prs,
+            cache_file=mock_main_cache_path,
+            existing_repo_names=set(),
+        )
+    )
 
     assert len(results) == expected_results
 
@@ -734,7 +872,9 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
     mock_search_flow["mock_initial_check"].assert_not_called()
     # Detailed check is always called when it gets this far (i.e., not skipped earlier by something else)
     # and the detailed check returns True in this test case.
-    mock_search_flow["mock_detailed_check"].assert_called_once_with(repo1, label, max_age, max_prs)
+    mock_search_flow["mock_detailed_check"].assert_called_once_with(
+        repo1, label, max_age, max_prs
+    )
 
     # Assertions for qualifying cases (all states yield result here)
     assert results[0] == repo1
@@ -742,7 +882,6 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
     mock_json_dump.assert_called_once_with(repo1.raw_data, main_cache_handle)
     main_cache_handle.write.assert_called_once_with("\n")
     main_cache_handle.flush.assert_called_once()
-
 
 
 @pytest.mark.unit
@@ -760,20 +899,22 @@ def test_search_with_filters_skips_detailed(mock_print, mock_search_flow):
     mock_main_cache_open_func = mock_search_flow["mock_main_cache_open_func"]
     mock_issue_cache_open_func = mock_search_flow["mock_issue_cache_open_func"]
     mock_json_dump = mock_search_flow["mock_json_dump"]
-    issue_cache_state = mock_search_flow["issue_cache_state"] # miss, hit_true, or hit_false
+    # issue_cache_state = mock_search_flow["issue_cache_state"] # Removed F841
 
     # Mock detailed check to return False
     mock_search_flow["mock_detailed_check"].return_value = False
     max_age, max_prs = 30, 1
 
-    results = list(searcher.search(
-        label=label,
-        language="go",
-        max_issue_age_days=max_age,
-        max_linked_prs=max_prs,
-        cache_file=mock_main_cache_path,
-        existing_repo_names=set(),
-    ))
+    results = list(
+        searcher.search(
+            label=label,
+            language="go",
+            max_issue_age_days=max_age,
+            max_linked_prs=max_prs,
+            cache_file=mock_main_cache_path,
+            existing_repo_names=set(),
+        )
+    )
 
     assert len(results) == 0
 
@@ -785,24 +926,31 @@ def test_search_with_filters_skips_detailed(mock_print, mock_search_flow):
     # Initial check is bypassed when filters are active
     mock_search_flow["mock_initial_check"].assert_not_called()
     # Detailed check is called (and returns False)
-    mock_search_flow["mock_detailed_check"].assert_called_once_with(repo1, label, max_age, max_prs)
+    mock_search_flow["mock_detailed_check"].assert_called_once_with(
+        repo1, label, max_age, max_prs
+    )
 
     # Assert nothing dumped/written
     mock_json_dump.assert_not_called()
     main_cache_handle.write.assert_not_called()
     main_cache_handle.flush.assert_not_called()
 
+
 @pytest.mark.unit
 @patch("repobird_leadgen.github_search.tqdm", MagicMock())
 @patch("repobird_leadgen.github_search.time.sleep", MagicMock())
 @patch("builtins.print")
-def test_search_with_filters_skips_cache_or_failed_detailed_DEPRECATED(mock_print, mock_search_flow):
+def test_search_with_filters_skips_cache_or_failed_detailed_DEPRECATED(
+    mock_print, mock_search_flow
+):
     """
     DEPRECATED: Original logic tested skipping based on hit_false OR failed detailed check.
     This is now covered by test_search_with_filters_skips_detailed.
     Keeping structure for reference but marking as skip.
     """
-    pytest.skip("Deprecated test, logic covered by test_search_with_filters_skips_detailed")
+    pytest.skip(
+        "Deprecated test, logic covered by test_search_with_filters_skips_detailed"
+    )
 
     # Original code below for reference
     # # Only run for cache miss or hit_false states
@@ -855,7 +1003,6 @@ def test_search_with_filters_skips_cache_or_failed_detailed_DEPRECATED(mock_prin
     # main_cache_handle.flush.assert_not_called()
 
 
-
 @pytest.mark.unit
 @patch("repobird_leadgen.github_search.tqdm", MagicMock())
 @patch("repobird_leadgen.github_search.time.sleep", MagicMock())
@@ -875,14 +1022,16 @@ def test_search_no_filters_qualifies(mock_print, mock_search_flow):
     mock_json_dump = mock_search_flow["mock_json_dump"]
     issue_cache_state = mock_search_flow["issue_cache_state"]
 
-    results = list(searcher.search(
-        label=label,
-        language="go",
-        max_issue_age_days=None, # No filters
-        max_linked_prs=None,
-        cache_file=mock_main_cache_path,
-        existing_repo_names=set(),
-    ))
+    results = list(
+        searcher.search(
+            label=label,
+            language="go",
+            max_issue_age_days=None,  # No filters
+            max_linked_prs=None,
+            cache_file=mock_main_cache_path,
+            existing_repo_names=set(),
+        )
+    )
 
     assert len(results) == 1
     assert results[0] == repo1
@@ -898,7 +1047,9 @@ def test_search_no_filters_qualifies(mock_print, mock_search_flow):
         mock_search_flow["mock_initial_check"].assert_called_once_with(repo1, label)
         # Issue cache appended (has_label=True)
         mock_issue_cache_open_func.assert_called_with("a", encoding="utf-8")
-        assert_issue_cache_dump(mock_json_dump, repo1.full_name, label, True, issue_cache_handle)
+        assert_issue_cache_dump(
+            mock_json_dump, repo1.full_name, label, True, issue_cache_handle
+        )
         # Repo data dumped to main cache
         mock_main_cache_open_func.assert_called_with("a", encoding="utf-8")
         # Find the main cache dump call
@@ -924,6 +1075,7 @@ def test_search_no_filters_qualifies(mock_print, mock_search_flow):
     main_cache_handle.write.assert_called_once_with("\n")
     main_cache_handle.flush.assert_called_once()
 
+
 @pytest.mark.unit
 @patch("repobird_leadgen.github_search.tqdm", MagicMock())
 @patch("repobird_leadgen.github_search.time.sleep", MagicMock())
@@ -947,17 +1099,21 @@ def test_search_no_filters_skips_initial(mock_print, mock_search_flow):
     if issue_cache_state == "miss":
         mock_search_flow["mock_initial_check"].return_value = False
 
-    results = list(searcher.search(
-        label=label,
-        language="go",
-        max_issue_age_days=None, # No filters
-        max_linked_prs=None,
-        cache_file=mock_main_cache_path,
-        existing_repo_names=set(),
-    ))
+    results = list(
+        searcher.search(
+            label=label,
+            language="go",
+            max_issue_age_days=None,  # No filters
+            max_linked_prs=None,
+            cache_file=mock_main_cache_path,
+            existing_repo_names=set(),
+        )
+    )
 
     assert len(results) == 0
-    mock_main_cache_open_func.assert_called_with("a", encoding="utf-8") # Main cache file opened
+    mock_main_cache_open_func.assert_called_with(
+        "a", encoding="utf-8"
+    )  # Main cache file opened
     main_cache_handle = mock_main_cache_open_func.return_value
     issue_cache_handle = mock_issue_cache_open_func.return_value
 
@@ -969,7 +1125,9 @@ def test_search_no_filters_skips_initial(mock_print, mock_search_flow):
         mock_search_flow["mock_initial_check"].assert_called_once_with(repo1, label)
         # Issue cache appended (has_label=False)
         mock_issue_cache_open_func.assert_called_with("a", encoding="utf-8")
-        assert_issue_cache_dump(mock_json_dump, repo1.full_name, label, False, issue_cache_handle)
+        assert_issue_cache_dump(
+            mock_json_dump, repo1.full_name, label, False, issue_cache_handle
+        )
         # Only issue cache dump expected
         assert mock_json_dump.call_count == 1
     elif issue_cache_state == "hit_false":
@@ -987,6 +1145,7 @@ def test_search_no_filters_skips_initial(mock_print, mock_search_flow):
 
 # --- Integration Tests --- (Kept for context, might need adjustments later)
 
+
 @pytest.mark.integration
 @skip_if_no_token
 def test_basic_search_integration(tmp_path):
@@ -999,10 +1158,10 @@ def test_basic_search_integration(tmp_path):
             label="good first issue",
             language="python",
             min_stars=50,
-            recent_days=730, # 2 years
+            recent_days=730,  # 2 years
             max_results=3,
             cache_file=cache_file,
-            existing_repo_names=set()
+            existing_repo_names=set(),
         )
         repos = list(repos_iterator)
 
@@ -1039,15 +1198,15 @@ def test_search_with_filters_integration(tmp_path):
         # Use filters likely to yield few results quickly
         # e.g., recent issues with zero linked PRs
         repos_iterator = gh.search(
-            label="help wanted", # Common label
+            label="help wanted",  # Common label
             language="python",
             min_stars=100,
             recent_days=180,
-            max_results=2, # Look for few results
-            max_issue_age_days=90, # Issues created in last 90 days
-            max_linked_prs=0,      # Issues with zero linked PRs
+            max_results=2,  # Look for few results
+            max_issue_age_days=90,  # Issues created in last 90 days
+            max_linked_prs=0,  # Issues with zero linked PRs
             cache_file=cache_file,
-            existing_repo_names=set()
+            existing_repo_names=set(),
         )
         repos = list(repos_iterator)
 
@@ -1063,7 +1222,9 @@ def test_search_with_filters_integration(tmp_path):
                 assert len(lines) == len(repos)
         else:
             # This is possible if no repos match the strict criteria
-            print("\nWarning: Filtered integration test found 0 repos matching criteria.")
+            print(
+                "\nWarning: Filtered integration test found 0 repos matching criteria."
+            )
             # Check if cache file was created (even if empty)
             assert cache_file.exists()
             # assert cache_file.read_text() == "" # File might contain header or be non-empty from previous runs if not cleaned
@@ -1073,6 +1234,8 @@ def test_search_with_filters_integration(tmp_path):
     except RateLimitExceededException:
         pytest.skip("GitHub API rate limit exceeded.")
     except GithubException as e:
-        pytest.fail(f"GitHub API error during test_search_with_filters: {e.status} {e.data}")
+        pytest.fail(
+            f"GitHub API error during test_search_with_filters: {e.status} {e.data}"
+        )
     except Exception as e:
         pytest.fail(f"Unexpected error during test_search_with_filters: {e}")

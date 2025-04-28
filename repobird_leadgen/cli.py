@@ -1,4 +1,3 @@
-
 import json
 import tempfile
 from pathlib import Path
@@ -315,7 +314,7 @@ def search(
             min_stars=min_stars,
             recent_days=recent_days,
             max_issue_age_days=max_issue_age_days,  # Pass new arg
-            max_linked_prs=max_linked_prs,          # Pass new arg
+            max_linked_prs=max_linked_prs,  # Pass new arg
             cache_file=cache_file,  # Pass the path for incremental writes
             existing_repo_names=existing_repo_names,  # Pass existing names
         ):
@@ -334,23 +333,23 @@ def search(
                 print(
                     f"\n[yellow]Search complete. No *new* repositories matching the criteria were added. Cache file → {cache_file} still contains previous results."
                 )
-                return cache_file # Return existing cache path
+                return cache_file  # Return existing cache path
             # Check if the file exists but is empty (search ran but found nothing new or old)
             elif cache_file.exists() and cache_file.stat().st_size == 0:
                 print(
                     f"[yellow]No repositories found matching the criteria. Empty cache file created: {cache_file}"
                 )
-                return None # Indicate no usable results
+                return None  # Indicate no usable results
             elif not cache_file.exists():
                 print(
                     "[red]Search process did not create a cache file, likely due to an early error."
                 )
-                return None # Indicate failure
-            else: # Should not happen given above checks, but just in case
-                 print(
+                return None  # Indicate failure
+            else:  # Should not happen given above checks, but just in case
+                print(
                     f"\n[yellow]Search complete. No *new* repositories matching the criteria were added to → {cache_file}"
-                 )
-                 return None # Indicate no usable results
+                )
+                return None  # Indicate no usable results
 
     except RuntimeError as e:  # Catch config errors or retry failures
         print(f"[red]Error during search: {e}")
@@ -519,7 +518,11 @@ def full_pipeline(
         cache_dir = Path(CACHE_DIR)
         cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
-            mode="w", delete=False, suffix=".jsonl", prefix="repobird_cache_", dir=cache_dir
+            mode="w",
+            delete=False,
+            suffix=".jsonl",
+            prefix="repobird_cache_",
+            dir=cache_dir,
         ) as tmp_file:
             temp_cache_path = Path(tmp_file.name)
 
@@ -534,8 +537,8 @@ def full_pipeline(
             max_results=max_results,
             min_stars=min_stars,
             recent_days=recent_days,
-            max_issue_age_days=max_issue_age_days, # Pass new arg
-            max_linked_prs=max_linked_prs,         # Pass new arg
+            max_issue_age_days=max_issue_age_days,  # Pass new arg
+            max_linked_prs=max_linked_prs,  # Pass new arg
             cache_file=temp_cache_path,  # Pass the temp path
             use_browser_checker=use_browser_checker,  # Pass the flag
         )
@@ -543,7 +546,9 @@ def full_pipeline(
         # Check if search succeeded and found results
         if actual_cache_path is None:
             # Search already printed messages about failure or no results
-            print("[yellow]Search step did not yield usable results. Skipping enrichment.")
+            print(
+                "[yellow]Search step did not yield usable results. Skipping enrichment."
+            )
             raise typer.Exit()  # Exit cleanly
         # Double check the file exists and is not empty before proceeding
         elif not actual_cache_path.exists() or actual_cache_path.stat().st_size == 0:
