@@ -1,8 +1,10 @@
 import json
+import os  # Needed for permission checks
 import shutil
 import tempfile
 import traceback  # For printing stack traces on error
 import webbrowser
+from datetime import datetime  # Import datetime
 from pathlib import Path
 from typing import List, Optional, Set  # Added Set
 
@@ -591,16 +593,58 @@ def full_pipeline(
                 )
 
 
+def _select_cache_file() -> Optional[Path]:
+    """Finds .jsonl files in CACHE_DIR and prompts user to select one."""
+    cache_dir = Path(CACHE_DIR)
+    if not cache_dir.is_dir():
+        print(f"[red]Cache directory not found: {cache_dir}")
+        return None
+
+    print(f"Searching for cache files in: {cache_dir}")
+    cache_files = sorted(
+        cache_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+
+    if not cache_files:
+        print(f"[yellow]No .jsonl cache files found in {cache_dir}.[/yellow]")
+        return None
+
+    print("[bold]Please select a cache file to review:[/bold]")
+    for i, file_path in enumerate(cache_files):
+        # Show relative path for cleaner display if possible
+        try:
+            display_path = file_path.relative_to(Path.cwd())
+        except ValueError:
+            display_path = file_path
+        print(
+            f"  [cyan]{i + 1}[/]: {display_path} (Modified: {datetime.fromtimestamp(file_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M')})"
+        )
+
+    while True:
+        try:
+            choice = typer.prompt(
+                f"Enter number (1-{len(cache_files)}) or 'q' to quit", type=str
+            )
+            if choice.lower() == "q":
+                print("Review cancelled.")
+                return None
+            choice_idx = int(choice) - 1
+            if 0 <= choice_idx < len(cache_files):
+                return cache_files[choice_idx]
+            else:
+                print("[yellow]Invalid selection. Please try again.[/yellow]")
+        except ValueError:
+            print("[yellow]Invalid input. Please enter a number or 'q'.[/yellow]")
+
+
 @app.command()
 def review(
-    cache_file: Path = typer.Argument(
-        ...,
-        help="Path to the raw_repos_*.jsonl cache file to review.",
-        exists=True,
+    cache_file: Optional[Path] = typer.Argument(
+        None,  # Make argument optional
+        help="Path to the raw_repos_*.jsonl cache file to review. If omitted, you will be prompted to select one.",
+        # Remove exists=True, readable=True, writable=True - check after selection/provision
         file_okay=True,
         dir_okay=False,
-        readable=True,
-        writable=True,  # Need write access to update the file
     ),
     auto_open: bool = typer.Option(
         False,
@@ -613,10 +657,33 @@ def review(
     """
     Interactively review individual issues within repositories listed in a cache file.
 
+    If CACHE_FILE is not provided, it lists .jsonl files in the cache directory
+    and prompts for selection.
+
     Opens each issue URL (optionally automatically) and prompts for approval.
-    Denied issues are removed from the 'found_issues' list. Repositories
+    Approved issues are added to the 'approved_issues' list. Repositories
     where all issues have been reviewed are marked with '"reviewed": true'.
     """
+    # --- Select Cache File Interactively if None Provided ---
+    if cache_file is None:
+        cache_file = _select_cache_file()
+        if cache_file is None:
+            raise typer.Exit()  # Exit if no file selected or found
+
+    # --- Validate selected/provided cache file ---
+    if not cache_file.exists():
+        print(f"[red]Error: Cache file not found: {cache_file}")
+        raise typer.Exit(code=1)
+    if not cache_file.is_file():
+        print(f"[red]Error: Specified path is not a file: {cache_file}")
+        raise typer.Exit(code=1)
+    # Basic read/write permission check (might not be foolproof)
+    if not os.access(cache_file, os.R_OK) or not os.access(cache_file.parent, os.W_OK):
+        print(
+            f"[red]Error: Insufficient permissions to read/write cache file or directory: {cache_file}"
+        )
+        raise typer.Exit(code=1)
+
     print(f"[bold blue]Starting interactive issue review for:[/bold blue] {cache_file}")
 
     repos_processed_count = 0
@@ -825,15 +892,15 @@ def review(
                     json.dump(data, outfile)
                     outfile.write("\n")
 
-                except json.JSONDecodeError:
+                # Catch specific expected errors during processing, let SystemExit/typer.Exit pass through
+                except (
+                    json.JSONDecodeError,
+                    KeyError,
+                    AttributeError,
+                    ValueError,
+                ) as e:
                     print(
-                        f"  [red]Error:[/red] Skipping invalid JSON on line {line_num}: {line[:100]}..."
-                    )
-                    error_count += 1
-                    outfile.write(line + "\n")  # Write original line back
-                except Exception as e:
-                    print(
-                        f"  [red]Unexpected Error[/red] processing repo on line {line_num}: {e}"
+                        f"  [red]Error processing data on line {line_num}: {e}. Skipping line."
                     )
                     error_count += 1
                     outfile.write(line + "\n")  # Write original line back
@@ -860,15 +927,19 @@ def review(
         print(f"Updated cache file: {cache_file}")
 
     except typer.Exit as e:
-        # Handle graceful exit via 'q'
-        # The finally block will handle saving the file.
-        if e.code == 0:
+        # Handle graceful exit via 'q' or other Exit calls
+        # Check if the Exit exception has a code attribute
+        exit_code = getattr(e, "code", 0) # Default to 0 if no code attribute
+
+        if exit_code == 0:
             print("Exited review process cleanly.")
         else:
-            print(f"Review process exited with code {e.code}.")
+            print(f"Review process exited with code {exit_code}.")
             # Consider leaving temp file if exit code indicates error
             if temp_output_path.exists():
                 print(f"Partial results might be in: {temp_output_path}")
+        # Note: The finally block in the outer try/except/finally structure
+        # should handle the file move correctly even on Exit.
 
     except KeyboardInterrupt:
         print("\n[bold magenta]Keyboard interrupt detected. Saving progress...[/]")

@@ -52,4 +52,14 @@ aider:
 aider-test:
 	@aider --no-auto-commit --lint-cmd scripts/lint.sh --auto-lint --test-cmd 'make test' --auto-test
 
-.PHONY: install-dev fix test install-browsers run run-browser update-cache aider aider-test
+# Interactively review issues in a cache file
+# Usage:
+#   make review                 # CLI will prompt for file selection from cache/
+#   make review ARGS="cache/your_file.jsonl" # Review specific file
+#   make review ARGS="--open"   # Prompt for file, auto-open URLs
+#   make review ARGS="cache/your_file.jsonl --open" # Specific file + auto-open
+review:
+	@echo "Running review command..."
+	$(VENV_RUN) repobird-leadgen review $(ARGS)
+
+.PHONY: install-dev fix test install-browsers run run-browser update-cache aider aider-test review
