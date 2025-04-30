@@ -1,5 +1,5 @@
 import json
-import logging  # Added
+import logging
 import os
 import traceback
 from dataclasses import (
@@ -28,10 +28,8 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-1.5-pro-preview-0409")
 MAX_COMMENTS_FOR_LLM = 100  # Limit number of comments sent to LLM
 PLAYWRIGHT_TIMEOUT = 30000  # 30 seconds for page operations
 
-# Setup basic logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 # --- Data Structures ---
 # IssueAnalysis is now imported from models.py
@@ -239,15 +237,77 @@ class Enricher:
                 except Exception as e:
                     logging.warning(f"Warning: Error closing page for {issue_url}: {e}")
 
+    def scrape_readme_text(self, repo_url: str) -> Optional[str]:
+        """
+        Navigates to the repository URL and scrapes the text content of the README.
+        (Similar to the method in BrowserIssueChecker)
+
+        Args:
+            repo_url: The full URL to the repository's main page.
+
+        Returns:
+            The text content of the README, or None if not found or an error occurs.
+        """
+        if not self.browser or not self.playwright:
+            logging.error(
+                "[Enricher] Playwright/Browser not initialized. Cannot scrape README."
+            )
+            return None
+
+        page = None
+        readme_selector = "article.markdown-body"  # Selector for the README content
+
+        try:
+            logging.info(f"  Scraping README from: {repo_url} ...")
+            page = self._get_new_page()
+            page.goto(repo_url, wait_until="domcontentloaded", timeout=self.timeout)
+            logging.info("    README page loaded. Waiting for selector...")
+
+            # Wait for the README container to be visible
+            readme_element = page.locator(readme_selector).first
+            readme_element.wait_for(state="visible", timeout=self.timeout)
+            logging.info("    README element located.")
+
+            # Extract text content
+            readme_text = readme_element.text_content(timeout=self.timeout / 2)
+            logging.info(
+                f"    README text extracted (length: {len(readme_text or '')})."
+            )
+            return readme_text.strip() if readme_text else None
+
+        except PlaywrightTimeoutError:
+            logging.warning(f"    Timeout waiting for README on {repo_url}")
+            return None
+        except PlaywrightError as pe:
+            logging.warning(
+                f"    Playwright error scraping README from {repo_url}: {pe}"
+            )
+            return None
+        except Exception as e:
+            logging.error(
+                f"    Unexpected error scraping README from {repo_url}: {e}",
+                exc_info=True,
+            )
+            return None
+        finally:
+            if page:
+                try:
+                    page.close()
+                except Exception as e:
+                    logging.warning(
+                        f"    Warning: Error closing page after README scrape: {e}"
+                    )
+
     def _build_prompt(
         self,
-        title: str,
-        body: str,
+        title: Optional[str],  # Allow None
+        body: Optional[str],  # Allow None
         comments: List[str],
         url_summaries: List[Dict[str, str]],
+        readme_text: Optional[str],  # Add readme_text parameter
     ) -> str:
-        """Builds the prompt for the LLM analysis, including URL summaries."""
-        if not title:
+        """Builds the prompt for the LLM analysis, including URL summaries and README."""
+        if not title:  # Keep this check
             return ""  # Cannot analyze without a title
 
         # Limit comments sent to LLM
@@ -269,8 +329,24 @@ class Enricher:
         # Generate the schema with updated descriptions
         schema_json = json.dumps(LLMIssueAnalysisSchema.model_json_schema(), indent=2)
 
+        # Format README text
+        readme_section = "<readme>\n"
+        if readme_text:
+            # Optional: Truncate README if it's excessively long?
+            # max_readme_len = 10000
+            # if len(readme_text) > max_readme_len:
+            #     readme_text = readme_text[:max_readme_len] + "... (truncated)"
+            readme_section += readme_text
+        else:
+            readme_section += "README content could not be scraped or was empty."
+        readme_section += "\n</readme>\n\n---\n"  # Separator
+
         prompt = f"""
-Analyze the following GitHub issue content (title, body, comments) and summaries of linked URLs to determine its suitability as a task potentially solvable by an autonomous AI software agent. Focus on understanding the core problem, its complexity, and requirements.
+Analyze the following GitHub issue content (title, body, comments), summaries of linked URLs, and the repository README to determine the issue's suitability as a task potentially solvable by an autonomous AI software agent. Focus on understanding the core problem, its complexity, requirements, and the overall context provided by the README.
+
+**Repository README Content:**
+
+{readme_section}
 
 **Input Issue Content:**
 
@@ -286,12 +362,12 @@ Analyze the following GitHub issue content (title, body, comments) and summaries
 
 ---
 
-{url_summaries_text} # Added URL Summaries Section
+{url_summaries_text}
 
 **Instructions:**
 
-Your task is to analyze the provided GitHub issue content (title, body, comments) AND the summaries of linked URLs.
-Based on your analysis, generate **ONLY** a valid JSON object that strictly conforms to the following JSON schema.
+Your task is to analyze the provided GitHub issue content (title, body, comments), the summaries of linked URLs, AND the repository README content.
+Based on your combined analysis, generate **ONLY** a valid JSON object that strictly conforms to the following JSON schema.
 **DO NOT** include any text, explanations, apologies, summaries, or markdown formatting before or after the JSON object. Your entire response must be the JSON object itself.
 
 **Required JSON Output Schema:**
@@ -305,10 +381,13 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
         return prompt
 
     def _analyze_issue_with_llm(
-        self, scraped_data: ScrapedIssueData, url_summaries: List[Dict[str, str]]
+        self,
+        scraped_data: ScrapedIssueData,
+        url_summaries: List[Dict[str, str]],
+        readme_text: Optional[str],  # Add readme_text parameter
     ) -> Dict[str, Any]:
         """
-        Analyzes the scraped issue data and URL summaries using LiteLLM, expecting a JSON object
+        Analyzes the scraped issue data, URL summaries, and README using LiteLLM, expecting a JSON object
         that conforms to the LLMIssueAnalysisSchema Pydantic model.
 
         Returns:
@@ -384,9 +463,41 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
             )
             return analysis_results  # Return empty list
 
+        logging.info(f"Processing repo: {repo_name}")
+
+        # --- Scrape README first ---
+        readme_text = self.scrape_readme_text(repo_html_url)
+        # --- End README scrape ---
+
         logging.info(f"Processing issues for repo: {repo_name}")
-        for issue_number in found_issues:
-            issue_url = f"{repo_html_url}/issues/{issue_number}"
+        for issue_info in found_issues:  # Iterate through issue dicts now
+            # Extract number and URL from the dict
+            issue_number = issue_info.get("number")
+            issue_url = issue_info.get("html_url")
+
+            # Basic validation of the issue info from the cache
+            if not isinstance(issue_number, int) or not issue_url:
+                logging.warning(
+                    f"  Skipping invalid issue entry in {repo_name}: {issue_info}"
+                )
+                # Optionally create an error analysis entry
+                error_str = f"Invalid issue data in cache: {issue_info}"
+                analysis = IssueAnalysis(
+                    issue_number=issue_number or -1,  # Use -1 if number is missing
+                    issue_url=issue_url or "Unknown URL",
+                    error=error_str,
+                    full_problem_statement="Error: Invalid issue data format in cache.",
+                    complexity_score=-1.0,
+                    is_good_first_issue_for_agent=False,
+                    reasoning="N/A - Invalid cache data",
+                    required_domain_knowledge=-1.0,
+                    codebase_familiarity_needed=-1.0,
+                    scope_clarity=-1.0,
+                    meta_notes="Invalid issue data provided in cache.",
+                )
+                analysis_results.append(analysis)
+                continue
+
             analysis: Optional[IssueAnalysis] = None
             error_str: Optional[str] = None
             url_summaries: List[Dict[str, str]] = []  # Initialize for each issue
@@ -447,10 +558,12 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
                 )
             # --- End: URL Processing ---
 
-            # 2. Analyze Issue Content (including URL Summaries)
+            # 2. Analyze Issue Content (including URL Summaries and README)
             llm_result_dict = self._analyze_issue_with_llm(
-                scraped_data, url_summaries
-            )  # Pass summaries
+                scraped_data,
+                url_summaries,
+                readme_text,  # Pass readme_text
+            )
 
             # 3. Validate and Create Pydantic Object
             if llm_result_dict.get("error"):

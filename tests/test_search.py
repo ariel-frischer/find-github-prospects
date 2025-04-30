@@ -111,6 +111,7 @@ def mock_repository(mocker, mock_repo_data):
     # Mock get_issues for detailed checks
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([])
+    mock_issues_paginator.totalCount = 0  # Default total count
     mock_repo.get_issues.return_value = mock_issues_paginator
 
     # Mock get_readme for contact scraper tests (if any)
@@ -271,9 +272,9 @@ def test_has_open_issue_with_label_api_true(
         side_effect=lambda func, *args, **kwargs: func(*args, **kwargs)
     )
 
-    result = searcher._has_open_issue_with_label_api(repo, label)
+    result_tuple = searcher._has_open_issue_with_label_api(repo, label)
 
-    assert result is True
+    assert result_tuple[0] is True  # Check the boolean part of the tuple
     expected_query = f"repo:{repo.full_name} is:issue is:open label:{label}"
     # Check that _execute_with_retry was called with the correct args
     searcher._execute_with_retry.assert_called_once_with(
@@ -295,9 +296,9 @@ def test_has_open_issue_with_label_api_false(
         side_effect=lambda func, *args, **kwargs: func(*args, **kwargs)
     )
 
-    result = searcher._has_open_issue_with_label_api(repo, label)
+    result_tuple = searcher._has_open_issue_with_label_api(repo, label)
 
-    assert result is False
+    assert result_tuple[0] is False  # Check the boolean part of the tuple
     expected_query = f"repo:{repo.full_name} is:issue is:open label:{label}"
     searcher._execute_with_retry.assert_called_once_with(
         mock_github["instance"].search_issues, query=expected_query
@@ -318,9 +319,9 @@ def test_has_open_issue_with_label_api_quoted(
         side_effect=lambda func, *args, **kwargs: func(*args, **kwargs)
     )
 
-    result = searcher._has_open_issue_with_label_api(repo, label)
+    result_tuple = searcher._has_open_issue_with_label_api(repo, label)
 
-    assert result is True
+    assert result_tuple[0] is True  # Check the boolean part of the tuple
     expected_query = (
         f'repo:{repo.full_name} is:issue is:open label:"{label}"'  # Note the quotes
     )
@@ -418,6 +419,7 @@ def test_find_qualifying_issues_no_filters(
 
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue1])
+    mock_issues_paginator.totalCount = 1
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
@@ -438,7 +440,8 @@ def test_find_qualifying_issues_no_issues_found(
     searcher = GitHubSearcher(token="dummy")
     repo = mock_repository
     mock_issues_paginator = MagicMock(spec=PaginatedList)
-    mock_issues_paginator.__iter__.return_value = iter([])  # No issues
+    mock_issues_paginator.__iter__.return_value = iter([])
+    mock_issues_paginator.totalCount = 0  # Default total count  # No issues
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
@@ -467,6 +470,7 @@ def test_find_qualifying_issues_age_met(
     issue_young = mock_issue(102, fixed_now - timedelta(days=5))
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue_young])
+    mock_issues_paginator.totalCount = 1
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
@@ -494,6 +498,7 @@ def test_find_qualifying_issues_age_not_met(
     issue_old = mock_issue(103, fixed_now - timedelta(days=15))
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue_old])
+    mock_issues_paginator.totalCount = 1
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
@@ -518,6 +523,7 @@ def test_find_qualifying_issues_pr_met(
 
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue1])
+    mock_issues_paginator.totalCount = 1
     repo.get_issues.return_value = mock_issues_paginator
 
     # Mock _get_linked_prs_count to return 1 PR
@@ -546,6 +552,7 @@ def test_find_qualifying_issues_pr_not_met(
     issue1 = mock_issue(105, now)
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue1])
+    mock_issues_paginator.totalCount = 1
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._get_linked_prs_count = MagicMock(return_value=3)
@@ -572,6 +579,7 @@ def test_find_qualifying_issues_pr_count_error(
 
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue1, issue2])
+    mock_issues_paginator.totalCount = 2
     repo.get_issues.return_value = mock_issues_paginator
 
     # Mock _get_linked_prs_count to fail for issue1, succeed for issue2
@@ -602,6 +610,7 @@ def test_find_qualifying_issues_age_and_pr_met(
     issue_good = mock_issue(108, fixed_now - timedelta(days=5))
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue_good])
+    mock_issues_paginator.totalCount = 1
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._get_linked_prs_count = MagicMock(return_value=1)
@@ -632,6 +641,7 @@ def test_find_qualifying_issues_age_fail_pr_met(
     issue_old = mock_issue(109, fixed_now - timedelta(days=15))
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue_old])
+    mock_issues_paginator.totalCount = 1
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._get_linked_prs_count = MagicMock(return_value=1)
@@ -662,6 +672,7 @@ def test_find_qualifying_issues_age_met_pr_fail(
     issue_young = mock_issue(110, fixed_now - timedelta(days=5))
     mock_issues_paginator = MagicMock(spec=PaginatedList)
     mock_issues_paginator.__iter__.return_value = iter([issue_young])
+    mock_issues_paginator.totalCount = 1
     repo.get_issues.return_value = mock_issues_paginator
 
     searcher._get_linked_prs_count = MagicMock(return_value=3)
@@ -698,6 +709,7 @@ def test_find_qualifying_issues_multiple_issues_one_qualifies(
     mock_issues_paginator.__iter__.return_value = iter(
         [issue_old, issue_many_prs, issue_good, issue_also_old]
     )
+    mock_issues_paginator.totalCount = 4
     repo.get_issues.return_value = mock_issues_paginator
 
     # Mock _get_linked_prs_count: called for 202 (returns 3), called for 203 (returns 1)
@@ -751,13 +763,20 @@ def mock_search_flow(mocker, mock_github, mock_repository, mock_filesystem, requ
     # Mock internal methods (can be overridden in tests)
     # Simulate API check returning True by default for cache miss scenario (for non-filter tests)
     mock_initial_check = mocker.patch.object(
-        searcher, "_has_open_issue_with_label_api", return_value=True
+        searcher,
+        "_has_open_issue_with_label_api",
+        return_value=(
+            True,
+            [{"number": 1, "html_url": "http://fake.url/1"}],
+        ),  # Return tuple
     )
     # Simulate detailed check returning a list with one issue ID by default
     mock_detailed_check = mocker.patch.object(
         searcher,
         "_find_qualifying_issues",
-        return_value=[123],  # Example qualifying ID list
+        return_value=[
+            {"number": 123, "html_url": "http://fake.url/123"}
+        ],  # Return list of dicts
     )
 
     # Mock _execute_with_retry
@@ -844,9 +863,9 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
     mock_json_dump = mock_search_flow["mock_json_dump"]
     # issue_cache_state = mock_search_flow["issue_cache_state"] # Removed F841
 
-    # Mock detailed check to return a qualifying list of issue IDs
-    qualifying_ids = [456]
-    mock_search_flow["mock_detailed_check"].return_value = qualifying_ids
+    # Mock detailed check to return a qualifying list of issue detail dicts
+    qualifying_details = [{"number": 456, "html_url": "http://fake.url/456"}]
+    mock_search_flow["mock_detailed_check"].return_value = qualifying_details
     max_age, max_prs = 30, 1
 
     results = list(
@@ -881,9 +900,10 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
 
     # Assertions for qualifying case
     assert results[0] == repo1
-    # Check main cache write - should contain 'found_issues' list
+    # Check main cache write - should contain 'found_issues' list of dicts
     expected_data = repo1.raw_data
-    expected_data["found_issues"] = qualifying_ids  # Add the expected field
+    # Use the qualifying_details list defined earlier
+    expected_data["found_issues"] = qualifying_details
     expected_data.pop(
         "_repobird_found_issues_basic", None
     )  # Remove old field if present
@@ -1134,7 +1154,7 @@ def test_search_no_filters_skips_initial(mock_print, mock_search_flow):
 
     # Override initial API check mock to return False for cache miss scenario
     if issue_cache_state == "miss":
-        mock_search_flow["mock_initial_check"].return_value = False
+        mock_search_flow["mock_initial_check"].return_value = (False, [])
 
     results = list(
         searcher.search(

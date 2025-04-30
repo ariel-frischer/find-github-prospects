@@ -18,7 +18,8 @@ from playwright.sync_api import (
 from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
-from rich import print
+# from rich import print # Remove print import
+import logging # Import logging
 from rich.progress import Progress
 
 # Add project root to sys.path to allow importing repobird_leadgen modules
@@ -37,6 +38,11 @@ sys.path.insert(0, str(project_root))
 
 # Import the moved function *after* sys.path is updated
 from repobird_leadgen.browser_checker import check_dev_section_for_prs  # noqa: E402
+# Import logging setup *after* sys.path is updated
+from repobird_leadgen.logging_setup import setup_logging # noqa: E402
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 # Selector for the "Closed" state label within the *fixed* (non-sticky) header metadata section
 CLOSED_STATE_SELECTOR = 'div[data-testid="issue-metadata-fixed"] span[data-testid="header-state"]:has-text("Closed")'
@@ -65,17 +71,17 @@ def is_issue_closed(page: Page) -> bool:
         if closed_label.count() > 0 and closed_label.is_visible(
             timeout=5000
         ):  # Short timeout
-            print("          - Issue state is 'Closed'.")
+            logger.info("Issue state is 'Closed'.")
             return True
         else:
-            # print("          - Issue state is not 'Closed'.") # Debug
+            # logger.debug("Issue state is not 'Closed'.") # Debug
             return False
     except PlaywrightTimeoutError:
-        print("          - Timeout checking issue state. Assuming not closed.")
+        logger.warning("Timeout checking issue state. Assuming not closed.")
         return False  # Assume open if state check times out
     except Exception as e:
-        print(
-            f"          [yellow]Warning: Error checking issue state: {e}. Assuming not closed.[/yellow]"
+        logger.warning(
+            f"Error checking issue state: {e}. Assuming not closed."
         )
         return False  # Assume open on error
 
@@ -114,11 +120,14 @@ def main(
     Requires GITHUB_TOKEN environment variable (potentially, if other API calls remain).
     Requires Playwright browsers to be installed (`playwright install`).
     """
-    print(
-        f"[bold blue]Starting PR filter (using Playwright) for:[/bold blue] {input_file}"
+    # Setup logging for this script run
+    setup_logging("filter_prs")
+
+    logger.info(
+        f"Starting PR filter (using Playwright) for: {input_file}"
     )
-    print("[yellow]This script will modify the file in-place.[/yellow]")
-    print("[cyan]Initializing Playwright...[/cyan]")
+    logger.warning("This script will modify the file in-place.")
+    logger.info("Initializing Playwright...")
 
     # Playwright setup happens outside the file loop
     try:
@@ -127,7 +136,7 @@ def main(
             # Headless=True is generally preferred for automation
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            print("[green]Playwright initialized successfully.[/green]")
+            logger.info("Playwright initialized successfully.")
 
             temp_output_path = input_file.with_suffix(input_file.suffix + ".tmp")
             repos_read = 0
@@ -152,12 +161,12 @@ def main(
                             "[cyan]Filtering repos...", total=total_lines
                         )
                     except Exception:
-                        print(
-                            "[yellow]Could not determine file length for progress bar.[/yellow]"
+                        logger.warning(
+                            "Could not determine file length for progress bar."
                         )
                         task = progress.add_task(
-                            "[cyan]Filtering repos..."
-                        )  # Indeterminate
+                            "[cyan]Filtering repos...", total=None # Indeterminate
+                        )
 
                     for line in infile:
                         repos_read += 1
@@ -177,8 +186,8 @@ def main(
                             if not repo_full_name or not isinstance(
                                 issue_analysis_list, list
                             ):
-                                print(
-                                    f"[yellow]Warning: Skipping line {repos_read} - Missing top-level 'full_name' or invalid 'issue_analysis'. Writing original line back.[/yellow]"
+                                logger.warning(
+                                    f"Skipping line {repos_read} - Missing top-level 'full_name' or invalid 'issue_analysis'. Writing original line back."
                                 )
                                 # Write the original line back to preserve it
                                 outfile.write(line + "\n")
@@ -188,14 +197,14 @@ def main(
 
                             if not issue_analysis_list:
                                 # Repo already has no issues, skip writing it
-                                print(
-                                    f"  Skipping repo {repo_full_name} (no issues in list)."
+                                logger.info(
+                                    f"Skipping repo {repo_full_name} (no issues in list)."
                                 )
                                 progress.update(task, advance=1)
                                 continue
 
-                            print(
-                                f"  Checking repo: {repo_full_name} ({len(issue_analysis_list)} issues)"
+                            logger.info(
+                                f"Checking repo: {repo_full_name} ({len(issue_analysis_list)} issues)"
                             )
                             filtered_issues: List[Dict[str, Any]] = []
                             repo_api_error = (
@@ -215,8 +224,8 @@ def main(
                                 )  # Get URL from data
 
                                 if not isinstance(issue_number, int) or not issue_url:
-                                    print(
-                                        f"    [yellow]Skipping invalid issue entry (missing number or URL): {issue_data.get('issue_url', 'N/A')}[/yellow]"
+                                    logger.warning(
+                                        f"Skipping invalid issue entry (missing number or URL): {issue_data.get('issue_url', 'N/A')}"
                                     )
                                     # Keep this invalid entry? Or remove? Let's keep it for now.
                                     # filtered_issues.append(issue_data)
@@ -224,8 +233,8 @@ def main(
 
                                 try:
                                     # Announce which issue is being checked *before* navigation
-                                    print(f"      Checking issue #{issue_number}...")
-                                    print(f"        URL: {issue_url}")
+                                    logger.info(f"Checking issue #{issue_number}...")
+                                    logger.debug(f"URL: {issue_url}")
 
                                     # Navigate to the issue page (needed for both checks)
                                     page.goto(
@@ -236,8 +245,8 @@ def main(
 
                                     # 1. Check if issue is closed
                                     if is_issue_closed(page):
-                                        print(
-                                            f"        [yellow]Removing issue #{issue_number} (state is 'Closed').[/yellow]"
+                                        logger.info(
+                                            f"Removing issue #{issue_number} (state is 'Closed')."
                                         )
                                         issues_removed_closed += (
                                             1  # Increment closed counter
@@ -251,35 +260,35 @@ def main(
                                         page,
                                         issue_url,  # Pass URL for logging inside the function
                                     ):  # check_dev_section_for_prs already includes delay
-                                        print(
-                                            f"        [yellow]Removing issue #{issue_number} (linked PR found in Dev section).[/yellow]"
+                                        logger.info(
+                                            f"Removing issue #{issue_number} (linked PR found in Dev section)."
                                         )
                                         issues_removed_pr += 1  # Increment PR counter
                                     else:
-                                        print(
-                                            f"        [green]Keeping issue #{issue_number} (Open, no linked PRs found in Dev section).[/green]"
+                                        logger.info(
+                                            f"Keeping issue #{issue_number} (Open, no linked PRs found in Dev section)."
                                         )
                                         filtered_issues.append(issue_data)
 
                                 except PlaywrightTimeoutError:
-                                    print(
-                                        f"        [red]Timeout navigating to or checking {issue_url}. Keeping issue.[/red]"
+                                    logger.error(
+                                        f"Timeout navigating to or checking {issue_url}. Keeping issue."
                                     )
                                     errors_api += 1
                                     filtered_issues.append(
                                         issue_data
                                     )  # Keep on timeout
                                 except PlaywrightError as e:
-                                    print(
-                                        f"        [red]Playwright error checking {issue_url}: {e}. Keeping issue.[/red]"
+                                    logger.error(
+                                        f"Playwright error checking {issue_url}: {e}. Keeping issue."
                                     )
                                     errors_api += 1
                                     filtered_issues.append(
                                         issue_data
                                     )  # Keep on playwright error
                                 except Exception as e:  # Catch other general errors during the check loop
-                                    print(
-                                        f"    [red]Error processing issue #{issue_number} in {repo_full_name}: {e}. Skipping issue check, keeping issue.[/red]"
+                                    logger.exception(
+                                        f"Error processing issue #{issue_number} in {repo_full_name}: {e}. Skipping issue check, keeping issue."
                                     )
                                     errors_api += 1  # Use general API error counter
                                     # Keep the issue if the check fails unexpectedly
@@ -294,27 +303,27 @@ def main(
                                 data["issue_analysis"] = filtered_issues
                                 outfile.write(json.dumps(data) + "\n")
                                 repos_written += 1
-                                print(
-                                    f"  Finished repo {repo_full_name}. Kept {len(filtered_issues)} issues."
+                                logger.info(
+                                    f"Finished repo {repo_full_name}. Kept {len(filtered_issues)} issues."
                                 )
                             elif not repo_api_error and not filtered_issues:
-                                print(
-                                    f"  Skipping repo {repo_full_name} (all issues removed or none to begin with)."
+                                logger.info(
+                                    f"Skipping repo {repo_full_name} (all issues removed or none to begin with)."
                                 )
                             # If repo_api_error is True, we don't write the repo back (though this flag might be less relevant now)
 
                         except json.JSONDecodeError:
-                            print(
-                                f"[yellow]Warning: Skipping line {repos_read} - Invalid JSON.[/yellow]"
+                            logger.warning(
+                                f"Skipping line {repos_read} - Invalid JSON."
                             )
                             errors_parsing += 1
                             # Write the original line back to preserve it
                             outfile.write(line + "\n")
                         except Exception as e:
-                            print(
-                                f"[red]Error processing line {repos_read}: {e}. Skipping line. Writing original line back.[/red]"
+                            logger.exception(
+                                f"Error processing line {repos_read}: {e}. Skipping line. Writing original line back."
                             )
-                            traceback.print_exc()
+                            # traceback.print_exc() # logger.exception includes traceback
                             errors_parsing += 1
                             # Write the original line back to preserve it
                             outfile.write(line + "\n")
@@ -327,47 +336,47 @@ def main(
                 input_file.unlink()  # Remove original
                 temp_output_path.rename(input_file)  # Rename temp to original name
 
-                print("\n--- PR Filter Summary ---")
-                print(f"  Repositories read: {repos_read}")
-                print(
+                logger.info("--- PR Filter Summary ---")
+                logger.info(f"  Repositories read: {repos_read}")
+                logger.info(
                     f"  Repositories written (with remaining issues): {repos_written}"
                 )
-                print(f"  Total issues checked: {issues_checked}")
-                print(f"  Issues removed (state was 'Closed'): {issues_removed_closed}")
-                print(f"  Issues removed (due to linked PRs): {issues_removed_pr}")
+                logger.info(f"  Total issues checked: {issues_checked}")
+                logger.info(f"  Issues removed (state was 'Closed'): {issues_removed_closed}")
+                logger.info(f"  Issues removed (due to linked PRs): {issues_removed_pr}")
                 if errors_parsing > 0:
-                    print(
-                        f"  [yellow]Lines skipped due to parsing errors: {errors_parsing}[/yellow]"
+                    logger.warning(
+                        f"  Lines skipped due to parsing errors: {errors_parsing}"
                     )
                 if errors_api > 0:
-                    print(
-                        f"  [red]Issues skipped due to processing errors: {errors_api}[/red]"
+                    logger.error(
+                        f"  Issues skipped due to processing errors: {errors_api}"
                     )  # Updated label
-                print(f"[bold green]Filtering complete. File updated → {input_file}[/]")
+                logger.info(f"Filtering complete. File updated: {input_file}")
 
             except Exception as e:
-                print(f"[bold red]An error occurred during filtering: {e}[/]")
-                traceback.print_exc()
+                logger.exception(f"An error occurred during filtering: {e}")
+                # traceback.print_exc() # logger.exception includes traceback
                 # Clean up temp file if it exists on error
                 if temp_output_path.exists():
                     try:
                         temp_output_path.unlink()
-                        print(
-                            f"[yellow]Removed temporary file due to error: {temp_output_path}"
+                        logger.warning(
+                            f"Removed temporary file due to error: {temp_output_path}"
                         )
                     except Exception as del_err:
-                        print(
-                            f"[red]Error removing temporary file {temp_output_path}: {del_err}"
+                        logger.error(
+                            f"Error removing temporary file {temp_output_path}: {del_err}"
                         )
                 sys.exit(1)
             finally:
                 # Ensure browser is closed within the Playwright context
-                print("[cyan]Closing Playwright browser...[/cyan]")
+                logger.info("Closing Playwright browser...")
                 browser.close()
 
     except Exception as e:
-        print(f"[bold red]Failed to initialize or run Playwright: {e}[/bold red]")
-        traceback.print_exc()
+        logger.exception(f"Failed to initialize or run Playwright: {e}")
+        # traceback.print_exc() # logger.exception includes traceback
         sys.exit(1)
 
 

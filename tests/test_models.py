@@ -2,6 +2,7 @@
 
 import pytest
 from pydantic import ValidationError
+from typing import List
 
 from repobird_leadgen.models import EnrichedRepoData, IssueAnalysis
 

@@ -7,14 +7,27 @@ from concurrent.futures import (
     as_completed,
 )
 from pathlib import Path
+import json
+import logging  # Import logging
+import multiprocessing
+import queue  # For QueueEmpty exception
+from concurrent.futures import (
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,  # Add this import back
+    as_completed,
+)
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
-from rich import print
+# from rich.console import Console # Remove Console import
 from rich.progress import Progress
 from tqdm import tqdm  # Add this import back for parallel_map
 
 T = TypeVar("T")
 R = TypeVar("R")
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 
 def parallel_map(
@@ -43,7 +56,7 @@ def parallel_map(
                 item_info = f"item at index {original_index}"  # Basic info
                 # Could try to get more specific item info if item_list[original_index] is simple
                 # item_info = str(item_list[original_index])[:50] # Example: first 50 chars
-                print(f"[red]Error processing {item_info}: {e}")
+                logger.error(f"Error processing {item_info}: {e}")
                 results_map[original_index] = None  # Indicate failure for this item
 
     # Reconstruct the results list in the original order
@@ -98,21 +111,25 @@ def _writer_process(
                     continue
                 except (EOFError, BrokenPipeError):
                     # Parent process might have exited unexpectedly
-                    print("[red]Writer process: Communication pipe broken. Exiting.")
+                    logger.error(
+                        "Writer process: Communication pipe broken. Exiting."
+                    )
                     break
                 except Exception as e:
                     # Log errors during writing but try to continue
-                    print(f"[red]Writer process error writing result: {e}")
+                    logger.error(f"Writer process error writing result: {e}")
                     # Optionally, write the error to a separate log?
-                    # For now, just print and advance progress bar to avoid stall
+                    # For now, just log and advance progress bar to avoid stall
                     processed_count += 1
                     progress.update(task, advance=1)
 
     except Exception as e:
-        print(f"[red]Writer process failed to open/write file {output_file}: {e}")
+        logger.exception(
+            f"Writer process failed to open/write file {output_file}: {e}"
+        )
     finally:
-        print(
-            f"[Writer process finished. Items written: {processed_count}/{total_items}]"
+        logger.info(
+            f"Writer process finished. Items written: {processed_count}/{total_items}"
         )
 
 
@@ -125,7 +142,7 @@ def _worker_wrapper(
         output_queue.put(result)
     except Exception as e:
         # Log error and potentially put an error object on the queue if needed
-        print(f"[red]Worker error processing item {item}: {e}")
+        logger.error(f"Worker error processing item {item}: {e}")
         # Decide if you want to signal failure via the queue.
         # For now, we assume fn handles its own errors and returns a dict with an error field.
         # If fn raises, the result won't be put on the queue.
@@ -154,7 +171,7 @@ def parallel_map_and_save(
     )  # Need length and ability to iterate multiple times if needed
     total_items = len(items_list)
     if total_items == 0:
-        print("No items to process.")
+        logger.info("No items to process.")
         # Ensure empty file is created? Or do nothing? Let's do nothing.
         # output_file.touch() # Optionally create empty file
         return
@@ -198,24 +215,26 @@ def parallel_map_and_save(
                 try:
                     future.result()  # Check for exceptions from the submit/wrapper
                 except Exception as e:
-                    print(f"[red]Error retrieving worker future result: {e}")
+                    logger.error(f"Error retrieving worker future result: {e}")
 
     except Exception as e:
-        print(f"[red]Error during parallel execution: {e}")
+        logger.exception(f"Error during parallel execution: {e}")
         # Consider how to signal the writer to stop cleanly in case of executor error
         # For now, it might hang or exit due to broken pipe
     finally:
         # Signal the writer process to finish
-        print("Signaling writer process to stop...")
+        logger.info("Signaling writer process to stop...")
         output_queue.put(_SENTINEL)
 
         # Wait for the writer process to terminate
-        print("Waiting for writer process to finish...")
+        logger.info("Waiting for writer process to finish...")
         writer.join(timeout=10)  # Add a timeout
         if writer.is_alive():
-            print("[yellow]Writer process did not exit cleanly. Terminating.")
+            logger.warning("Writer process did not exit cleanly. Terminating.")
             writer.terminate()
             writer.join()
 
         manager.shutdown()  # Shutdown the manager
-        print(f"Parallel processing finished. Workers attempted: {processed_count}")
+        logger.info(
+            f"Parallel processing finished. Workers attempted: {processed_count}"
+        )

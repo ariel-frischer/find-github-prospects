@@ -75,7 +75,10 @@ Finds repositories matching your criteria and saves the raw data to a JSON cache
     *   `--max-results` / `-n` INTEGER: Maximum number of repositories to fetch (default: 30).
     *   `--min-stars` / `-s` INTEGER: Minimum number of stars a repository must have (default: 20).
     *   `--recent-days` / `-d` INTEGER: Maximum number of days since the last push activity (default: 365).
-    *   `--cache-file` / `-c` PATH: Path to save the output JSON Lines cache file. If not specified, a filename is generated based on the search parameters (label, language, stars, days) in the `cache/` directory (e.g., `cache/raw_repos_label_good_first_issue_lang_python_stars_20_days_365.jsonl`). If the file already exists, new results are appended, skipping duplicates.
+    *   `--cache-file` / `-c` PATH: Path to save the raw repository data as a JSON Lines (`.jsonl`) file.
+        *   **How it works:** The `search` command saves the raw JSON data for each repository that meets *all* specified criteria (including label, age, PR filters) to this file, one JSON object per line.
+        *   **Incremental & Skipping:** If the specified cache file already exists, the command first reads it to identify repositories that have already been processed and saved. It then skips checking these repositories again during the current search. Any *new* qualifying repositories found are appended to the existing file. This prevents duplicate entries and saves API calls on subsequent runs with the same cache file.
+        *   **Default Naming:** If `--cache-file` is not provided, a filename is automatically generated based on the search parameters (label, language, stars, days, age, prs) and placed in the `cache/` directory (e.g., `cache/raw_repos_label_good_first_issue_lang_python_stars_20_days_365_age_30_prs_0.jsonl`).
     *   `--max-issue-age-days` INTEGER: Only find repos where at least one matching issue was created within this many days (optional).
     *   `--max-linked-prs` INTEGER: [Search Phase] Only find repos where at least one matching issue has this many or fewer linked pull requests (optional).
     *   `--use-browser-checker`: [Search Phase] Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.

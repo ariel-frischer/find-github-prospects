@@ -1,7 +1,8 @@
-from repobird_leadgen.utils import parallel_map
-import time
 import random
 import re
+import time
+
+from repobird_leadgen.utils import parallel_map
 
 # ANSI escape code pattern
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*[mK]")
@@ -48,19 +49,16 @@ def test_parallel_map_success():
     assert results == expected_results
 
 
-def test_parallel_map_exception_handling(capsys):
+def test_parallel_map_exception_handling(caplog):
     """Test parallel_map with a function that raises an exception for some inputs."""
     inputs = [1, 2, 3, 4, 5]
     expected_results = [1, 2, 4, 5]
     results = parallel_map(raise_exception, inputs, max_workers=2)
     assert results == expected_results
 
-    # Check that the error was logged (captured by capsys)
-    captured = capsys.readouterr()
-    # Strip ANSI codes before checking the content
-    stdout_clean = strip_ansi_codes(captured.out)
-    assert "Error processing item at index 2" in stdout_clean
-    assert "Test exception for value 3" in stdout_clean
+    # Check that the error was logged (captured by caplog)
+    assert "Error processing item at index 2" in caplog.text
+    assert "Test exception for value 3" in caplog.text
 
 
 def test_parallel_map_empty_input():

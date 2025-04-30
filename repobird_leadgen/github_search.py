@@ -24,6 +24,8 @@ from github import (
 )
 from github.Issue import Issue
 from github.Repository import Repository
+# from rich.console import Console # Remove Console import
+import logging # Import logging
 from tqdm import tqdm
 
 # Import the new browser checker
@@ -35,6 +37,9 @@ _REPO_QUERY_TEMPLATE = (
     "archived:false fork:false stars:>={min_stars}"
     " language:{language} pushed:>{pushed_after}"
 )
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 
 class GitHubSearcher:
@@ -72,19 +77,21 @@ class GitHubSearcher:
         ] = {}
         self._load_issue_cache()
 
-        print(
-            f"[GitHubSearcher] Initialized. Using Browser Checker: {self.use_browser_checker}. Issue cache loaded with {len(self.issue_cache)} entries."
+        logger.info(
+            f"GitHubSearcher Initialized. Using Browser Checker: {self.use_browser_checker}. Issue cache loaded with {len(self.issue_cache)} entries."
         )
 
     def _load_issue_cache(self):
         """Loads the basic issue label check results from the cache file."""
         if not self.issue_cache_path.exists():
-            print(
-                f"[GitHubSearcher] Issue cache file not found: {self.issue_cache_path}. Starting fresh."
+            logger.info(
+                f"Issue cache file not found: {self.issue_cache_path}. Starting fresh."
             )
             return
 
-        print(f"[GitHubSearcher] Loading issue cache from: {self.issue_cache_path}")
+        logger.info(
+            f"Loading issue cache from: {self.issue_cache_path}"
+        )
         count = 0
         try:
             with self.issue_cache_path.open("r", encoding="utf-8") as f:
@@ -98,8 +105,8 @@ class GitHubSearcher:
                             # Ensure issue_details is always a list, default to empty if missing
                             issue_details = data.get("issue_details", [])
                             if not isinstance(issue_details, list):
-                                print(
-                                    f"[yellow]Warning: Invalid 'issue_details' format in cache for {data['repo']}, resetting to []."
+                                logger.warning(
+                                    f"Invalid 'issue_details' format in cache for {data['repo']}, resetting to []."
                                 )
                                 issue_details = []
 
@@ -109,16 +116,18 @@ class GitHubSearcher:
                             )
                             count += 1
                         else:
-                            print(
-                                f"[yellow]Warning: Skipping invalid line in issue cache: {line[:100]}..."
+                            logger.warning(
+                                f"Skipping invalid line in issue cache: {line[:100]}..."
                             )
                     except json.JSONDecodeError:
-                        print(
-                            f"[yellow]Warning: Skipping invalid JSON line in issue cache: {line[:100]}..."
+                        logger.warning(
+                            f"Skipping invalid JSON line in issue cache: {line[:100]}..."
                         )
-            print(f"[GitHubSearcher] Loaded {count} entries into issue cache.")
+            logger.info(f"Loaded {count} entries into issue cache.")
         except Exception as e:
-            print(f"[red]Error loading issue cache file {self.issue_cache_path}: {e}")
+            logger.error(
+                f"Error loading issue cache file {self.issue_cache_path}: {e}"
+            )
             self.issue_cache = {}  # Start fresh if loading fails
 
     def _append_to_issue_cache(
@@ -144,8 +153,8 @@ class GitHubSearcher:
                 json.dump(entry, f)
                 f.write("\n")
         except Exception as e:
-            print(
-                f"[red]Error appending to issue cache file {self.issue_cache_path}: {e}"
+            logger.error(
+                f"Error appending to issue cache file {self.issue_cache_path}: {e}"
             )
 
     def _build_repo_query(
@@ -160,30 +169,57 @@ class GitHubSearcher:
             pushed_after=pushed_after_str,
         )
 
-    def _has_open_issue_with_label_api(self, repo: Repository, label: str) -> bool:
-        """API check: Does the repo have *any* open issue with the label?"""
+    def _has_open_issue_with_label_api(
+        self, repo: Repository, label: str
+    ) -> Tuple[bool, List[Dict[str, Any]]]:
+        """
+        API check: Does the repo have open issues with the label?
+        Returns (bool, list_of_issue_details), where details are {'number': int, 'html_url': str}.
+        Fetches details for up to 30 issues if found.
+        """
         safe_label = f'"{label}"' if " " in label else label
         issue_query = f"repo:{repo.full_name} is:issue is:open label:{safe_label}"
+        issue_details: List[Dict[str, Any]] = []
         try:
             # Use execute_with_retry for the search call itself
-            issues = self._execute_with_retry(self.gh.search_issues, query=issue_query)
-            return issues.totalCount > 0
+            issues_paginator = self._execute_with_retry(
+                self.gh.search_issues, query=issue_query
+            )
+            if not issues_paginator:
+                logger.warning(
+                    f"API check for label '{label}' on {repo.full_name} failed to get paginator after retries. Assuming false."
+                )
+                return False, []
+
+            has_issues = issues_paginator.totalCount > 0
+            if has_issues:
+                # Fetch details for the first few issues (up to 30)
+                count = 0
+                max_to_fetch = 30
+                for issue in issues_paginator:
+                    if count >= max_to_fetch:
+                        break
+                    issue_details.append(
+                        {"number": issue.number, "html_url": issue.html_url}
+                    )
+                    count += 1
+            return has_issues, issue_details
         except RuntimeError as e:
             # Catch failure after retries from _execute_with_retry
-            print(
-                f"[yellow]Warning: API check for label '{label}' on {repo.full_name} failed after retries: {e}. Assuming false."
+            logger.warning(
+                f"API check for label '{label}' on {repo.full_name} failed after retries: {e}. Assuming false."
             )
-            return False
+            return False, []
         except GithubException as ge:
-            print(
-                f"[yellow]Warning: GitHub error during API label check for {repo.full_name}: {ge}. Assuming false."
+            logger.warning(
+                f"GitHub error during API label check for {repo.full_name}: {ge}. Assuming false."
             )
-            return False
+            return False, []
         except Exception as e:
-            print(
-                f"[yellow]Warning: Unexpected error during API label check for {repo.full_name}: {e}. Assuming false."
+            logger.warning(
+                f"Unexpected error during API label check for {repo.full_name}: {e}. Assuming false."
             )
-            return False
+            return False, []
 
     # --- New Helper Methods --- START
     def _get_linked_prs_count(self, issue: Issue) -> int:
@@ -193,8 +229,8 @@ class GitHubSearcher:
             # Wrap the timeline fetching in retry logic
             timeline = self._execute_with_retry(issue.get_timeline)
             if not timeline:
-                print(
-                    f"  [!] Failed to get timeline for issue #{issue.number} after retries."
+                logger.warning(
+                    f"Failed to get timeline for issue #{issue.number} after retries."
                 )
                 return -1  # Indicate error
 
@@ -210,18 +246,18 @@ class GitHubSearcher:
                     count += 1
             return count
         except RuntimeError as e:
-            print(
-                f"[yellow]Warning: Timeline fetch for issue {issue.number} in repo {issue.repository.full_name} failed after retries: {e}. Cannot count PRs."
+            logger.warning(
+                f"Timeline fetch for issue {issue.number} in repo {issue.repository.full_name} failed after retries: {e}. Cannot count PRs."
             )
             return -1  # Indicate error
         except GithubException as ge:
-            print(
-                f"[yellow]Warning: GitHub error fetching timeline for issue {issue.number} in repo {issue.repository.full_name}: {ge}. Cannot count PRs."
+            logger.warning(
+                f"GitHub error fetching timeline for issue {issue.number} in repo {issue.repository.full_name}: {ge}. Cannot count PRs."
             )
             return -1
         except Exception as e:
-            print(
-                f"[yellow]Warning: Unexpected error fetching timeline for issue {issue.number} in repo {issue.repository.full_name}: {e}. Cannot count PRs."
+            logger.warning(
+                f"Unexpected error fetching timeline for issue {issue.number} in repo {issue.repository.full_name}: {e}. Cannot count PRs."
             )
             return -1
 
@@ -231,16 +267,16 @@ class GitHubSearcher:
         label: str,
         max_issue_age_days: Optional[int],
         max_linked_prs: Optional[int],
-    ) -> List[int]:
+    ) -> List[Dict[str, Any]]:
         """
-        Fetches open issues with the label and returns the numbers of those
+        Fetches open issues with the label and returns details (number, url) of those
         that satisfy the age/PR criteria (up to a limit).
-        Returns a list of qualifying issue numbers.
+        Returns a list of dictionaries, each containing 'number' and 'html_url'.
         """
-        qualifying_issue_numbers: List[int] = []
+        qualifying_issues_details: List[Dict[str, Any]] = []
         try:
-            print(
-                f"  Performing detailed check: Repo {repo.full_name}, Label '{label}', Max Age: {max_issue_age_days}, Max PRs: {max_linked_prs}"
+            logger.info(
+                f"Performing detailed check: Repo {repo.full_name}, Label '{label}', Max Age: {max_issue_age_days}, Max PRs: {max_linked_prs}"
             )
             # Fetch issues with the label using the API (wrapped in retry)
             issues_paginator = self._execute_with_retry(
@@ -248,8 +284,8 @@ class GitHubSearcher:
             )
 
             if not issues_paginator:
-                print(
-                    f"  [!] Failed to fetch issues for {repo.full_name} after retries."
+                logger.warning(
+                    f"Failed to fetch issues for {repo.full_name} after retries."
                 )
                 return []  # Return empty list on failure
 
@@ -264,73 +300,99 @@ class GitHubSearcher:
             # Limit iteration to avoid excessive API calls if many issues exist
             issues_checked = 0
             max_issues_to_check = 30  # Configurable? Maybe later.
-            for issue in issues_paginator:
-                issues_checked += 1
-                if issues_checked > max_issues_to_check:
-                    print(
-                        f"  Checked {max_issues_to_check} issues for {repo.full_name}, none qualified so far. Stopping detailed check."
-                    )
-                    break  # Stop checking after a limit
 
-                print(f"    Checking issue #{issue.number} '{issue.title[:50]}...'")
+            # --- Add tqdm progress bar for issue checking ---
+            total_issues_with_label = issues_paginator.totalCount
+            progress_total = min(total_issues_with_label, max_issues_to_check)
+            issue_iterator = iter(issues_paginator)  # Get iterator
 
-                # 1. Check Age
-                if age_threshold:
-                    # Ensure issue.created_at is timezone-aware (it should be from PyGithub)
-                    created_at_aware = issue.created_at
-                    if created_at_aware.tzinfo is None:
-                        # Should not happen with PyGithub, but handle defensively
-                        created_at_aware = created_at_aware.replace(tzinfo=timezone.utc)
-
-                    if created_at_aware < age_threshold:
-                        print(
-                            f"      Issue #{issue.number} is too old (created {created_at_aware.date()}). Skipping."
-                        )
-                        continue  # Skip to next issue
-
-                # 2. Check Linked PRs (only if age is okay or not checked)
-                if max_linked_prs is not None:
-                    print(f"      Checking linked PRs for issue #{issue.number}...")
-                    pr_count = self._get_linked_prs_count(issue)
-                    if pr_count == -1:
-                        print(
-                            f"      [!] Failed to get PR count for issue #{issue.number}. Skipping issue."
-                        )
-                        continue  # Skip issue if PR count failed
-                    if pr_count > max_linked_prs:
-                        print(
-                            f"      Issue #{issue.number} has too many linked PRs ({pr_count} > {max_linked_prs}). Skipping."
-                        )
-                        continue  # Skip to next issue
-                    else:
-                        print(
-                            f"      Issue #{issue.number} has {pr_count} linked PRs (<= {max_linked_prs}). OK."
-                        )
-
-                # If we reach here, the issue satisfies all active criteria
-                print(f"      [+] Issue #{issue.number} qualifies!")
-                qualifying_issue_numbers.append(issue.number)
-                # Continue checking other issues up to the limit
-
-            # If loop finishes, return the list of numbers found
-            print(
-                f"  Found {len(qualifying_issue_numbers)} qualifying issues among the first {issues_checked} checked for {repo.full_name} with label '{label}'."
+            logger.info(
+                f"Found {total_issues_with_label} issues with label for {repo.full_name}, checking up to {max_issues_to_check}"
             )
-            return qualifying_issue_numbers
+
+            with tqdm(
+                total=progress_total, desc="  Checking issues", leave=False
+            ) as issue_pbar:
+                for issue in issue_iterator:
+                    issues_checked += 1
+                    if issues_checked > max_issues_to_check:
+                        logger.info(
+                            f"Checked {max_issues_to_check} issues for {repo.full_name}, none qualified so far. Stopping detailed check."
+                        )
+                        break  # Stop checking after a limit
+
+                    # Update progress bar description with current issue URL
+                    issue_pbar.set_postfix_str(f"Issue {issue.html_url}", refresh=True)
+
+                    logger.debug(f"Checking issue: {issue.html_url}")  # Use debug level
+
+                    # 1. Check Age
+                    if age_threshold:
+                        # Ensure issue.created_at is timezone-aware (it should be from PyGithub)
+                        created_at_aware = issue.created_at
+                        if created_at_aware.tzinfo is None:
+                            # Should not happen with PyGithub, but handle defensively
+                            created_at_aware = created_at_aware.replace(
+                                tzinfo=timezone.utc
+                            )
+
+                        if created_at_aware < age_threshold:
+                            logger.info(
+                                f"Issue {issue.html_url} is too old (created {created_at_aware.date()}). Skipping."
+                            )
+                            issue_pbar.update(1)  # Advance progress bar
+                            continue  # Skip to next issue
+
+                    # 2. Check Linked PRs (only if age is okay or not checked)
+                    if max_linked_prs is not None:
+                        logger.debug(
+                            f"Checking linked PRs for issue: {issue.html_url}..."
+                        )  # Use debug
+                        pr_count = self._get_linked_prs_count(issue)
+                        if pr_count == -1:
+                            logger.warning(
+                                f"Failed to get PR count for issue {issue.html_url}. Skipping issue."
+                            )
+                            issue_pbar.update(1)  # Advance progress bar
+                            continue  # Skip issue if PR count failed
+                        if pr_count > max_linked_prs:
+                            logger.info(
+                                f"Issue {issue.html_url} has too many linked PRs ({pr_count} > {max_linked_prs}). Skipping."
+                            )
+                            issue_pbar.update(1)  # Advance progress bar
+                            continue  # Skip to next issue
+                        else:
+                            logger.info(
+                                f"Issue {issue.html_url} has {pr_count} linked PRs (<= {max_linked_prs}). OK."
+                            )
+
+                    # If we reach here, the issue satisfies all active criteria
+                    logger.info(f"Issue {issue.html_url} qualifies!")
+                    qualifying_issues_details.append(
+                        {"number": issue.number, "html_url": issue.html_url}
+                    )
+                    issue_pbar.update(1)  # Advance progress bar
+                    # Continue checking other issues up to the limit
+
+            # If loop finishes, return the list of details found
+            logger.info(
+                f"Found {len(qualifying_issues_details)} qualifying issues among the first {issues_checked} checked for {repo.full_name} with label '{label}'."
+            )
+            return qualifying_issues_details
 
         except RuntimeError as e:
-            print(
-                f"[red]Error during detailed issue check for {repo.full_name} after retries: {e}"
+            logger.error(
+                f"Error during detailed issue check for {repo.full_name} after retries: {e}"
             )
             return []  # Return empty list on error
         except GithubException as ge:
-            print(
-                f"[red]GitHub error during detailed issue check for {repo.full_name}: {ge}"
+            logger.error(
+                f"GitHub error during detailed issue check for {repo.full_name}: {ge}"
             )
             return []  # Return empty list on error
         except Exception as e:
-            print(
-                f"[red]Unexpected error during detailed issue check for {repo.full_name}: {e}"
+            logger.exception(
+                f"Unexpected error during detailed issue check for {repo.full_name}: {e}"
             )
             return []  # Return empty list on error
 
@@ -351,11 +413,13 @@ class GitHubSearcher:
         if exception and "Retry-After" in exception.headers:
             try:
                 wait_seconds = int(exception.headers["Retry-After"]) + 5
-                print(f"Using Retry-After header: waiting {wait_seconds:.0f} seconds.")
+                logger.warning(
+                    f"Using Retry-After header: waiting {wait_seconds:.0f} seconds."
+                )
                 time.sleep(wait_seconds)
                 return
             except (ValueError, TypeError):
-                print("Could not parse Retry-After header.")
+                logger.warning("Could not parse Retry-After header.")
 
         # 2. Primary Rate Limit Info
         try:
@@ -377,19 +441,23 @@ class GitHubSearcher:
                 else:
                     # Limit should be reset, but add safety delay
                     wait_seconds = 5
-                    print(
+                    logger.info(
                         f"Primary '{limit_type}' limit should be reset. Waiting safety {wait_seconds}s."
                     )
 
             else:
-                print(f"Unknown rate limit type '{limit_type}'. Using default wait.")
+                logger.warning(
+                    f"Unknown rate limit type '{limit_type}'. Using default wait."
+                )
                 wait_seconds = 60  # Fallback
 
         except Exception as e:
-            print(f"Error getting rate limit details: {e}. Falling back to 60s wait.")
+            logger.error(
+                f"Error getting rate limit details: {e}. Falling back to 60s wait."
+            )
             wait_seconds = 60  # Fallback
 
-        print(
+        logger.warning(
             f"Waiting {wait_seconds:.0f} seconds for '{limit_type}' limit (Reset: {reset_time_str}, Remaining: {remaining_str}/{limit_str})."
         )
         time.sleep(wait_seconds)
@@ -412,15 +480,15 @@ class GitHubSearcher:
                 elif "get_issues" in func_name:
                     limit_type = "core"
 
-                print(
-                    f"\nRate limit hit ({limit_type}, attempt {attempt + 1}/{max_retries}). Waiting..."
+                logger.warning(
+                    f"Rate limit hit ({limit_type}, attempt {attempt + 1}/{max_retries}). Waiting..."
                 )
                 self._wait_for_rate_limit_reset(limit_type, exception=rle)
             except GithubException as ge:
                 if hasattr(ge, "status") and ge.status >= 500:
                     delay = (base_delay**attempt) + random.uniform(0, 1)
-                    print(
-                        f"\nGitHub API server error (Status {ge.status}, attempt {attempt + 1}/{max_retries}): {ge.data.get('message', 'No message')}. Retrying in {delay:.2f}s..."
+                    logger.warning(
+                        f"GitHub API server error (Status {ge.status}, attempt {attempt + 1}/{max_retries}): {ge.data.get('message', 'No message')}. Retrying in {delay:.2f}s..."
                     )
                     time.sleep(delay)
                 elif (
@@ -432,8 +500,8 @@ class GitHubSearcher:
                     delay = (base_delay ** (attempt + 1)) + random.uniform(
                         0, 5
                     )  # Longer, more random delay for secondary
-                    print(
-                        f"\nGitHub API secondary rate limit detected (attempt {attempt + 1}/{max_retries}). Retrying aggressively in {delay:.2f}s..."
+                    logger.warning(
+                        f"GitHub API secondary rate limit detected (attempt {attempt + 1}/{max_retries}). Retrying aggressively in {delay:.2f}s..."
                     )
                     time.sleep(delay)
                 # Handle 404 Not Found gracefully for specific operations if needed
@@ -442,28 +510,28 @@ class GitHubSearcher:
                     and ge.status == 404
                     and func.__name__ in ["get_issues", "get_timeline"]
                 ):
-                    print(
-                        f"\nResource not found (404) for {func.__name__}. Returning None."
+                    logger.warning(
+                        f"Resource not found (404) for {func.__name__}. Returning None."
                     )
                     return None  # Allow flow to continue if a resource isn't found
                 else:
-                    print(f"\nNon-retryable GitHub error encountered: {ge}")
+                    logger.error(f"Non-retryable GitHub error encountered: {ge}")
                     raise  # Re-raise other GithubExceptions
             except Exception as e:
                 # Catch other exceptions like connection errors etc.
-                print(
-                    f"\nUnexpected error during API call (attempt {attempt + 1}/{max_retries}): {e}"
+                logger.error(
+                    f"Unexpected error during API call (attempt {attempt + 1}/{max_retries}): {e}"
                 )
                 if attempt < max_retries - 1:
                     delay = (base_delay**attempt) + random.uniform(0, 1)
-                    print(f"Retrying in {delay:.2f}s...")
+                    logger.info(f"Retrying in {delay:.2f}s...")
                     time.sleep(delay)
                 else:
-                    print("Max retries reached for unexpected error.")
+                    logger.error("Max retries reached for unexpected error.")
                     raise  # Re-raise after max retries
 
-        print(
-            f"\nMax retries ({max_retries}) exceeded for function {func.__name__}. Aborting operation."
+        logger.error(
+            f"Max retries ({max_retries}) exceeded for function {func.__name__}. Aborting operation."
         )
         raise RuntimeError(
             f"Failed to execute {func.__name__} after {max_retries} retries due to persistent API errors."
@@ -504,16 +572,16 @@ class GitHubSearcher:
         repo_query = self._build_repo_query(
             language=language, min_stars=min_stars, recent_days=recent_days
         )
-        print(f"Searching GitHub repositories with query: {repo_query}")
-        print(f"Filtering for repos with open issues labeled: '{label}'")
+        logger.info(f"Searching GitHub repositories with query: {repo_query}")
+        logger.info(f"Filtering for repos with open issues labeled: '{label}'")
         if max_issue_age_days is not None:
-            print(f"  Applying Max Issue Age filter: {max_issue_age_days} days")
+            logger.info(f"Applying Max Issue Age filter: {max_issue_age_days} days")
         if max_linked_prs is not None:
-            print(f"  Applying Max Linked PRs filter: {max_linked_prs}")
-        print(f"Saving results incrementally to: {cache_file}")
+            logger.info(f"Applying Max Linked PRs filter: {max_linked_prs}")
+        logger.info(f"Saving results incrementally to: {cache_file}")
         if self.use_browser_checker:
-            print(
-                "[yellow]Using Browser Checker for initial label check (ignored if detailed filters active).[/]"
+            logger.warning(
+                "Using Browser Checker for initial label check (ignored if detailed filters active)."
             )
 
         found_count = 0
@@ -544,13 +612,15 @@ class GitHubSearcher:
             )
 
             if not paginated_list:
-                print("[red]Initial repository search failed after multiple retries.")
+                logger.error(
+                    "Initial repository search failed after multiple retries."
+                )
                 return
 
-            print(
+            logger.info(
                 f"Found {paginated_list.totalCount} potential repos matching base criteria."
             )
-            print(
+            logger.info(
                 f"Checking them for qualifying '{label}' issues until {max_results} are found..."
             )
 
@@ -582,10 +652,11 @@ class GitHubSearcher:
 
                         # --- Qualification Logic --- START
                         repo_qualifies = False
-                        found_issue_numbers: List[int] = []
+                        # Will store list of dicts: {'number': int, 'html_url': str}
+                        found_issues_list: List[Dict[str, Any]] = []
                         issue_details_for_cache: List[
                             Dict[str, Any]
-                        ] = []  # For internal issue cache only
+                        ] = []  # For internal issue cache only (basic check path)
 
                         if detailed_filters_active:
                             # --- Detailed Filter Path ---
@@ -593,15 +664,15 @@ class GitHubSearcher:
                                 f"Detailed check {repo_full_name}", refresh=True
                             )
                             detailed_check_count += 1
-                            # Call the modified function which returns a list of issue numbers
-                            qualifying_issue_numbers = self._find_qualifying_issues(
+                            # Call the modified function which returns a list of issue detail dicts
+                            qualifying_issues_details = self._find_qualifying_issues(
                                 repo, label, max_issue_age_days, max_linked_prs
                             )
                             repo_qualifies = bool(
-                                qualifying_issue_numbers
+                                qualifying_issues_details
                             )  # Qualifies if list is not empty
-                            found_issue_numbers = (
-                                qualifying_issue_numbers  # Store the list
+                            found_issues_list = (
+                                qualifying_issues_details  # Store the list of dicts
                             )
                             # Note: We don't use or update the `issue_cache` here.
 
@@ -617,13 +688,13 @@ class GitHubSearcher:
                                 )
                                 # Set repo_qualifies based on the cached value
                                 repo_qualifies = has_label_initially
-                                print(
-                                    f"  [Cache Hit] Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}"
+                                logger.info(
+                                    f"Cache Hit: Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}"
                                 )
                             else:
                                 # Cache Miss - Perform live basic label check
-                                print(
-                                    f"  [Cache Miss] Checking {repo_full_name} for '{label}'..."
+                                logger.info(
+                                    f"Cache Miss: Checking {repo_full_name} for '{label}'..."
                                 )
                                 check_result: Optional[
                                     Tuple[bool, List[Dict[str, Any]]]
@@ -638,23 +709,29 @@ class GitHubSearcher:
                                             )
                                         )
                                     except Exception as browser_err:
-                                        print(
-                                            f"[red]Error during browser check for {repo_full_name}: {browser_err}. Skipping repo."
+                                        logger.error(
+                                            f"Error during browser check for {repo_full_name}: {browser_err}. Skipping repo."
                                         )
                                         continue  # Skip to next repo
                                 else:
                                     # API check (returns only boolean)
                                     try:
-                                        api_has_label = (
+                                        (
+                                            api_has_label,
+                                            api_issue_details,
+                                        ) = (  # Capture details
                                             self._has_open_issue_with_label_api(
                                                 repo, label
                                             )
                                         )
-                                        # API check doesn't give details, so details list is empty
-                                        check_result = (api_has_label, [])
+                                        # API check now returns details
+                                        check_result = (
+                                            api_has_label,
+                                            api_issue_details,
+                                        )
                                     except Exception as api_err:
-                                        print(
-                                            f"[red]Error during API label check for {repo_full_name}: {api_err}. Skipping repo."
+                                        logger.error(
+                                            f"Error during API label check for {repo_full_name}: {api_err}. Skipping repo."
                                         )
                                         continue  # Skip to next repo
 
@@ -686,25 +763,31 @@ class GitHubSearcher:
                                         issue_details_for_cache,
                                     )
                                     # REMOVED duplicate call to self._append_to_issue_cache here
-                                    print(
-                                        f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}. Cached."
+                                    logger.info(
+                                        f"Check Done: Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}. Cached."
                                     )
                                 else:
                                     # Check failed, cannot determine label presence
-                                    print(
-                                        f"  [Check Failed] Skipping {repo_full_name}."
+                                    logger.warning(
+                                        f"Check Failed: Skipping {repo_full_name}."
                                     )
                                     continue  # Skip to next repo
 
-                            # Determine issue numbers list from the potentially filtered details
-                            found_issue_numbers = [
-                                num
-                                for item in issue_details_for_cache  # Use the final list
+                            # Determine issue details list from the potentially filtered details
+                            # In the basic path, issue_details_for_cache might contain number, title, desc, url
+                            # We primarily need number and url for found_issues_list
+                            found_issues_list = [
+                                {
+                                    "number": item.get("number"),
+                                    "html_url": item.get(
+                                        "html_url"
+                                    ),  # Try to get URL from cache details
+                                }
+                                for item in issue_details_for_cache
                                 if isinstance(item, dict)
-                                and (num := item.get("number")) is not None
+                                and item.get("number") is not None
                             ]
-                            # REMOVED: Redundant qualification check based on found_issue_numbers
-                            # repo_qualifies = bool(found_issue_numbers)
+                            # Qualification (repo_qualifies) is already set based on has_label_initially
 
                         # --- Qualification Logic --- END
 
@@ -714,17 +797,35 @@ class GitHubSearcher:
                             found_count += 1
                             pbar.update(1)
                             pbar.set_postfix_str("Found qualified", refresh=False)
-                            print(f"\n  [+] Qualified: {repo.full_name}")
-                            print(f"      URL: {repo.html_url}")
-                            print(
-                                f"      Found Issue IDs: {found_issue_numbers}"
-                            )  # Print IDs
-                            print(f"      ({found_count}/{max_results})")
+                            # Log qualification info
+                            logger.info(f"Qualified: {repo.full_name}")
+                            logger.info(f"  Repo URL: {repo.html_url}")
+                            logger.info("  Found Issues:")
+                            for issue_detail in found_issues_list:
+                                issue_num = issue_detail.get("number")
+                                issue_url = issue_detail.get("html_url")
+                                # Construct URL if missing (e.g., from basic API check path)
+                                if not issue_url and issue_num:
+                                    issue_url = f"{repo.html_url}/issues/{issue_num}"
+                                logger.info(f"    - #{issue_num}: {issue_url}")
+                            logger.info(f"  ({found_count}/{max_results})")
 
                             # Save raw data to the main cache file
-                            # Add the list of found issue numbers
+                            # Add the list of found issue details (number and URL)
+                            # Ensure URL is present in the saved data
+                            issues_to_save = []
+                            for issue_detail in found_issues_list:
+                                issue_num = issue_detail.get("number")
+                                issue_url = issue_detail.get("html_url")
+                                if not issue_url and issue_num:
+                                    issue_url = f"{repo.html_url}/issues/{issue_num}"
+                                if issue_num and issue_url:  # Only save if we have both
+                                    issues_to_save.append(
+                                        {"number": issue_num, "html_url": issue_url}
+                                    )
+
                             repo.raw_data["found_issues"] = (
-                                found_issue_numbers  # Store list of ints
+                                issues_to_save  # Store list of dicts
                             )
 
                             # Remove the old key if it exists (defensive)
@@ -743,48 +844,49 @@ class GitHubSearcher:
                             )
                             pbar.set_postfix_str(f"Skipped ({reason})", refresh=False)
                             if detailed_filters_active:
-                                print(
-                                    f"  [-] Repo {repo_full_name} skipped (failed detailed age/PR filter)."
+                                logger.info(
+                                    f"Repo {repo_full_name} skipped (failed detailed age/PR filter)."
                                 )
-                            # No need for else print, basic filter path prints its own messages
+                            # No need for else log, basic filter path logs its own messages
 
                     except StopIteration:
-                        print("\nReached end of GitHub repository search results.")
+                        logger.info(
+                            "Reached end of GitHub repository search results."
+                        )
                         break
                     except (RuntimeError, GithubException, UnknownObjectException) as e:
-                        print(
-                            f"\n[yellow]Warning: Skipping repo {repo_full_name if 'repo' in locals() else '(unknown)'} due to error: {e}"
+                        logger.warning(
+                            f"Skipping repo {repo_full_name if 'repo' in locals() else '(unknown)'} due to error: {e}"
                         )
                         if (
                             isinstance(e, GithubException)
                             and hasattr(e, "status")
                             and e.status == 422
                         ):
-                            print(
-                                "[red]Stopping search due to persistent invalid query (422)."
+                            logger.error(
+                                "Stopping search due to persistent invalid query (422)."
                             )
                             break
                         continue  # Skip to next repo
                     except Exception as e:
-                        import traceback
-
-                        print(
-                            f"\n[red]Unexpected error processing repo stream: {e}. Skipping."
+                        # import traceback # No longer needed with logger.exception
+                        logger.exception(
+                            f"Unexpected error processing repo stream: {e}. Skipping."
                         )
-                        traceback.print_exc()  # Print stack trace for unexpected errors
+                        # traceback.print_exc() # logger.exception includes traceback
                         continue  # Skip to next repo
 
             # End of loop summary
             pbar.close()  # Ensure progress bar is closed cleanly
-            print(
-                f"\nSearch loop finished. Processed: {processed_repo_count}, Found Qualified: {found_count}"
+            logger.info(
+                f"Search loop finished. Processed: {processed_repo_count}, Found Qualified: {found_count}"
             )
             if skipped_cached_count > 0:
-                print(
+                logger.info(
                     f"Skipped {skipped_cached_count} repositories already in main cache."
                 )
             if detailed_filters_active:
-                print(
+                logger.info(
                     f"Performed detailed age/PR check on {detailed_check_count} repositories."
                 )
 
@@ -792,33 +894,32 @@ class GitHubSearcher:
                 found_count < max_results
                 and processed_repo_count < paginated_list.totalCount
             ):
-                print(
-                    f"\nStopped after finding {found_count} qualified repositories (max_results reached)."
+                logger.info(
+                    f"Stopped after finding {found_count} qualified repositories (max_results reached)."
                 )
             elif found_count < max_results:
-                print(
-                    f"\nWarning: Found only {found_count} qualified repositories after checking all {processed_repo_count} processed repos."
+                logger.warning(
+                    f"Found only {found_count} qualified repositories after checking all {processed_repo_count} processed repos."
                 )
             elif found_count == 0:
-                print(
-                    f"\nNo repositories matching all criteria (including detailed filters if active) were found among {processed_repo_count} processed repos."
+                logger.warning(
+                    f"No repositories matching all criteria (including detailed filters if active) were found among {processed_repo_count} processed repos."
                 )
             else:
-                print(
-                    f"\nSuccessfully found and cached {found_count} qualified repositories."
+                logger.info(
+                    f"Successfully found and cached {found_count} qualified repositories."
                 )
 
         except RuntimeError as e:
-            print(f"[red]Error during search operation: {e}")
+            logger.error(f"Error during search operation: {e}")
         except GithubException as e:
-            print(f"[red]GitHub API error during search setup: {e}")
+            logger.error(f"GitHub API error during search setup: {e}")
             if hasattr(e, "status") and e.status == 401:
                 raise RuntimeError("Bad GitHub credentials. Check GITHUB_TOKEN.") from e
         except Exception as e:
-            import traceback
-
-            print(f"[red]An unexpected error occurred during search setup: {e}")
-            traceback.print_exc()
+            # import traceback # No longer needed
+            logger.exception(f"An unexpected error occurred during search setup: {e}")
+            # traceback.print_exc() # logger.exception includes traceback
             raise
         finally:
             if checker_context:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+# from rich.console import Console # Remove Console import
+import logging  # Import logging
 import re
 import time
-import traceback  # Added for the moved function
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple  # Added Dict, Any
 
@@ -17,7 +18,8 @@ from playwright.sync_api import (
 from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
-from rich import print
+
+logger = logging.getLogger(__name__)  # Get logger
 
 # --- Constants moved from filter_issues_by_prs.py ---
 # Selector for the sidebar section containing "Development"
@@ -46,14 +48,14 @@ def check_dev_section_for_prs(page: Page, issue_url: str) -> bool:
         True if linked PRs are found in the Development section, False otherwise.
         Returns False on Playwright errors (e.g., timeout).
     """
-    print(f"      Checking Development section for linked PRs on {issue_url}...")
+    logger.info(f"Checking Development section for linked PRs on {issue_url}...")
     try:
         # Wait for the Development section header itself to be visible first
         page.locator(f'{DEV_SECTION_SELECTOR} h3:has-text("Development")').wait_for(
             state="visible",
             timeout=15000,  # Shorter timeout for this check
         )
-        # print("        - Development section header found.") # Debug
+        # console.print("        - Development section header found.") # Debug
 
         # Check specifically for anchor tags with '/pull/' in href within the list
         # This covers open, closed, and merged PRs listed in the Development section
@@ -61,31 +63,31 @@ def check_dev_section_for_prs(page: Page, issue_url: str) -> bool:
         pr_count = linked_pr_links.count()
 
         if pr_count > 0:
-            print(f"        - Found {pr_count} linked PR(s) in Development section.")
+            logger.info(
+                f"Found {pr_count} linked PR(s) in Development section for {issue_url}."
+            )
             return True  # Found one or more linked PRs
         else:
             # Section header found, but no PR links within the specific list structure
-            print(
-                "        - Development section found, but no linked PRs detected within it."
+            logger.info(
+                f"Development section found, but no linked PRs detected within it for {issue_url}."
             )
             return False
 
     except PlaywrightTimeoutError:
         # If the Development section header doesn't appear, assume no linked PRs shown
-        print(
-            f"        [yellow]Timeout waiting for Development section on {issue_url}. Assuming no linked PRs.[/yellow]"
+        logger.warning(
+            f"Timeout waiting for Development section on {issue_url}. Assuming no linked PRs."
         )
         return False
     except PlaywrightError as e:
-        print(
-            f"        [red]Playwright error checking Dev section on {issue_url}: {e}. Assuming no linked PRs.[/red]"
+        logger.error(
+            f"Playwright error checking Dev section on {issue_url}: {e}. Assuming no linked PRs."
         )
         return False
     except Exception as e:
-        print(
-            f"        [red]Unexpected error checking Dev section on {issue_url}: {e}[/red]"
-        )
-        traceback.print_exc()
+        logger.exception(f"Unexpected error checking Dev section on {issue_url}: {e}")
+        # traceback.print_exc() # logger.exception includes traceback
         return False
 
 
@@ -136,8 +138,8 @@ class BrowserIssueChecker:
         self.timeout = timeout  # milliseconds
         self._playwright: Optional[Playwright] = None
         self._browser = None
-        print(
-            f"[BrowserChecker] Initialized (Headless: {headless}, Delay: {check_delay}s, Timeout: {timeout}ms)"
+        logger.info(
+            f"BrowserChecker Initialized (Headless: {headless}, Delay: {check_delay}s, Timeout: {timeout}ms)"
         )
 
     def __enter__(self) -> BrowserIssueChecker:
@@ -147,10 +149,12 @@ class BrowserIssueChecker:
             # Launch browser - consider adding slow_mo for debugging if needed
             # self._browser = self._playwright.chromium.launch(headless=self.headless, slow_mo=50)
             self._browser = self._playwright.chromium.launch(headless=self.headless)
-            print("[BrowserChecker] Playwright started and browser launched.")
+            logger.info("BrowserChecker: Playwright started and browser launched.")
         except Exception as e:
-            print(f"[red][BrowserChecker] Error starting Playwright/Browser: {e}")
-            print("[red]Ensure browser binaries are installed ('playwright install').")
+            logger.exception(f"BrowserChecker: Error starting Playwright/Browser: {e}")
+            logger.error(
+                "Ensure browser binaries are installed ('playwright install')."
+            )
             self._cleanup()  # Ensure cleanup if launch fails
             raise  # Re-raise the exception
         return self
@@ -158,7 +162,7 @@ class BrowserIssueChecker:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Closes the browser and stops Playwright."""
         self._cleanup()
-        print("[BrowserChecker] Browser closed and Playwright stopped.")
+        logger.info("BrowserChecker: Browser closed and Playwright stopped.")
 
     def _cleanup(self):
         """Safely closes browser and stops Playwright."""
@@ -166,20 +170,20 @@ class BrowserIssueChecker:
             try:
                 self._browser.close()
             except Exception as e:
-                print(f"[yellow][BrowserChecker] Error closing browser: {e}")
+                logger.warning(f"BrowserChecker: Error closing browser: {e}")
             self._browser = None
         if self._playwright:
             try:
                 self._playwright.stop()
             except Exception as e:
-                print(f"[yellow][BrowserChecker] Error stopping Playwright: {e}")
+                logger.warning(f"BrowserChecker: Error stopping Playwright: {e}")
             self._playwright = None
 
     def _fetch_issue_details(
         self, page: Page, issue_url: str
     ) -> Optional[Dict[str, str]]:
         """Navigates to an issue URL and extracts title and description."""
-        print(f"    Fetching details for: {issue_url}")
+        logger.info(f"Fetching details for: {issue_url}")
         try:
             page.goto(issue_url, wait_until="domcontentloaded", timeout=self.timeout)
             # Wait for container elements to be attached, give full timeout
@@ -188,43 +192,43 @@ class BrowserIssueChecker:
             # Use data-testid for the body container
             body_container_selector = 'div[data-testid="issue-body"]'
 
-            # print(f"      Waiting for title container: '{title_container_selector}'...")
+            # console.print(f"      Waiting for title container: '{title_container_selector}'...")
             page.wait_for_selector(
                 title_container_selector, state="attached", timeout=self.timeout
             )
-            # print("      Title container found.") # Commented out
+            # console.print("      Title container found.") # Commented out
 
-            # print(f"      Waiting for body container: '{body_container_selector}'...") # Commented out
+            # console.print(f"      Waiting for body container: '{body_container_selector}'...") # Commented out
             page.wait_for_selector(
                 body_container_selector, state="attached", timeout=self.timeout
             )
-            # print("      Body container found.") # Commented out
+            # console.print("      Body container found.") # Commented out
 
             # Explicitly wait for the title element (BDI) to be VISIBLE
-            # print(f"      Waiting for title element BDI to be visible: '{self._ISSUE_TITLE_SELECTOR}'...")
+            # console.print(f"      Waiting for title element BDI to be visible: '{self._ISSUE_TITLE_SELECTOR}'...")
             page.wait_for_selector(
                 self._ISSUE_TITLE_SELECTOR, state="visible", timeout=self.timeout
             )
-            # print("      Title element BDI is visible.")
+            # console.print("      Title element BDI is visible.")
             title_element = page.locator(self._ISSUE_TITLE_SELECTOR).first
 
             # Explicitly wait for the body element to be VISIBLE
-            # print(f"      Waiting for body element to be visible: '{self._ISSUE_BODY_SELECTOR}'...") # Commented out
+            # console.print(f"      Waiting for body element to be visible: '{self._ISSUE_BODY_SELECTOR}'...") # Commented out
             page.wait_for_selector(
                 self._ISSUE_BODY_SELECTOR, state="visible", timeout=self.timeout
             )
-            # print("      Body element is visible.") # Commented out
+            # console.print("      Body element is visible.") # Commented out
             body_element = page.locator(self._ISSUE_BODY_SELECTOR).first
-            # print("      Body element located.") # Commented out
+            # console.print("      Body element located.") # Commented out
 
             # Revert to text_content() with a shorter timeout for the extraction itself
-            # print("      Extracting title text using text_content()...") # Commented out
+            # console.print("      Extracting title text using text_content()...") # Commented out
             title = title_element.text_content(timeout=self.timeout / 2) or ""
-            # print("      Title text extracted.") # Commented out
+            # console.print("      Title text extracted.") # Commented out
 
-            # print("      Extracting body text using text_content()...") # Commented out
+            # console.print("      Extracting body text using text_content()...") # Commented out
             description = body_element.text_content(timeout=self.timeout / 2) or ""
-            # print("      Body text extracted.") # Commented out
+            # console.print("      Body text extracted.") # Commented out
 
             # Basic cleanup
             title = title.strip()
@@ -233,19 +237,17 @@ class BrowserIssueChecker:
             title = title.strip()
             description = description.strip()
 
-            print(f"      Title: '{title[:50]}...'")
+            logger.info(f"Fetched Title: '{title[:50]}...' for {issue_url}")
             return {"title": title, "description": description}
 
         except PlaywrightTimeoutError:
-            print(f"      [yellow]Timeout fetching details for {issue_url}")
+            logger.warning(f"Timeout fetching details for {issue_url}")
             return None
         except PlaywrightError as pe:
-            print(
-                f"      [yellow]Playwright error fetching details for {issue_url}: {pe}"
-            )
+            logger.warning(f"Playwright error fetching details for {issue_url}: {pe}")
             return None
         except Exception as e:
-            print(f"      [red]Unexpected error fetching details for {issue_url}: {e}")
+            logger.exception(f"Unexpected error fetching details for {issue_url}: {e}")
             return None
 
     def _check_issue_for_linked_prs(self, page: Page, issue_url: str) -> bool:
@@ -274,7 +276,7 @@ class BrowserIssueChecker:
             page.set_default_timeout(self.timeout)
             return page
         except Exception as e:
-            print(f"[red][BrowserChecker] Error creating new browser page: {e}")
+            logger.exception(f"BrowserChecker: Error creating new browser page: {e}")
             raise
 
     def check_repo_for_issue_label(
@@ -287,14 +289,16 @@ class BrowserIssueChecker:
         Args:
             repo_full_name: The 'owner/repo' name string.
             label: The issue label to include in the search query.
+            max_linked_prs: If 0, issues with linked PRs in the Development section
+                            will be excluded. If None or other int, this check is skipped.
 
         Returns:
             A tuple: (bool indicating if issues were found, list of issue detail dicts).
             Each dict contains: {'number': int, 'title': str, 'description': str}
         """
         if not self._browser or not self._playwright:
-            print(
-                "[red][BrowserChecker] Playwright/Browser not initialized. Cannot perform check."
+            logger.error(
+                "BrowserChecker: Playwright/Browser not initialized. Cannot perform check."
             )
             return False, []  # Return tuple (bool, list)
 
@@ -308,21 +312,23 @@ class BrowserIssueChecker:
             f"https://github.com/{repo_full_name}/issues?q={encoded_query}"
         )
 
-        # found_issue_flag = False # Removed unused variable
+        # found_issue_flag = False # This was the unused variable, removed.
         issue_numbers: List[int] = []
         found_issues_details: List[Dict[str, Any]] = []  # Store full details
 
         try:
-            print(f"[BrowserChecker] Getting new page for {repo_full_name}...")
+            logger.info(f"BrowserChecker: Getting new page for {repo_full_name}...")
             page = self._get_new_page()
-            print(
-                f"[BrowserChecker] Navigating directly to filtered URL: {filtered_issues_url}..."
+            logger.info(
+                f"BrowserChecker: Navigating directly to filtered URL: {filtered_issues_url}..."
             )
             # Navigate directly to the pre-filtered URL
             page.goto(
                 filtered_issues_url, wait_until="domcontentloaded", timeout=self.timeout
             )
-            print(f"[BrowserChecker] Navigation to {filtered_issues_url} successful.")
+            logger.info(
+                f"BrowserChecker: Navigation to {filtered_issues_url} successful."
+            )
 
             # No need to interact with the filter input anymore
 
@@ -335,8 +341,8 @@ class BrowserIssueChecker:
             results_selector = (
                 f"{self._ISSUE_ROW_SELECTOR}, {self._NO_RESULTS_SELECTOR}"
             )
-            print(
-                f"[BrowserChecker] Waiting for results element '{results_selector}' to be attached..."
+            logger.info(
+                f"BrowserChecker: Waiting for results element '{results_selector}' to be attached..."
             )
             try:
                 # Wait for either the first issue row OR the no results blankslate to be attached
@@ -345,20 +351,19 @@ class BrowserIssueChecker:
                     state="attached",  # Wait for element to be in DOM, not necessarily visible
                     timeout=self.timeout,
                 )
-                print(
-                    "[BrowserChecker] Results element (issue row or blankslate) attached."
+                logger.info(
+                    "BrowserChecker: Results element (issue row or blankslate) attached."
                 )
 
                 # Now check specifically which element was found and if issue rows exist
                 # Use the updated row selector directly
                 issue_rows = page.locator(self._ISSUE_ROW_SELECTOR)
                 count = issue_rows.count()
-                print(
-                    f"[BrowserChecker] Found {count} potential issue row(s) matching selector '{self._ISSUE_ROW_SELECTOR}'."
+                logger.info(
+                    f"BrowserChecker: Found {count} potential issue row(s) matching selector '{self._ISSUE_ROW_SELECTOR}'."
                 )
 
                 if count > 0:
-                    # found_issue_flag = True # Removed unused variable assignment
                     # Extract issue numbers from links within rows
                     for i in range(count):
                         row = issue_rows.nth(i)
@@ -372,22 +377,26 @@ class BrowserIssueChecker:
                                     issue_num = int(match.group(1))
                                     issue_numbers.append(issue_num)
                                 except (ValueError, IndexError):
-                                    print(
-                                        f"[yellow]Could not parse issue number from href: {href}"
+                                    logger.warning(
+                                        f"Could not parse issue number from href: {href}"
                                     )
                             else:
-                                print(
-                                    f"[yellow]Could not find issue number pattern in href: {href}"
+                                logger.warning(
+                                    f"Could not find issue number pattern in href: {href}"
                                 )
                         else:
-                            print(
-                                f"[yellow]Issue link element found in row {i} but has no href attribute."
+                            logger.warning(
+                                f"Issue link element found in row {i} but has no href attribute."
                             )
-                    print(f"[BrowserChecker] Extracted issue numbers: {issue_numbers}")
+                    logger.info(
+                        f"BrowserChecker: Extracted issue numbers: {issue_numbers}"
+                    )
 
                     # --- Fetch details for each found issue ---
                     if issue_numbers:
-                        print(f"  Fetching details for {len(issue_numbers)} issues...")
+                        logger.info(
+                            f"Fetching details for {len(issue_numbers)} issues..."
+                        )
                         # Reuse the same page for fetching details
                         for issue_num in issue_numbers:
                             issue_url = f"https://github.com/{repo_full_name}/issues/{issue_num}"
@@ -408,76 +417,142 @@ class BrowserIssueChecker:
                                         page, issue_url
                                     )
                                     if has_prs:
-                                        print(
-                                            f"      [!] Issue #{issue_num} has linked PRs in Dev section. Excluding from results."
+                                        # Add explicit message about exclusion
+                                        logger.warning(
+                                            f"Issue #{issue_num} has linked PRs. Excluding from results (max_linked_prs=0)."
                                         )
                                         # Remove the details we just added
                                         found_issues_details.pop()
                                     else:
-                                        print(
-                                            f"      [+] Issue #{issue_num} has no linked PRs in Dev section. Keeping."
+                                        logger.info(
+                                            f"Issue #{issue_num} has no linked PRs. Keeping."
                                         )
                                 # --- End PR check ---
 
                             else:  # Details fetch failed
-                                print(
-                                    f"    [yellow]Skipping details and PR check for issue {issue_num} due to fetch error."
+                                logger.warning(
+                                    f"Skipping details and PR check for issue {issue_num} due to fetch error."
                                 )
                             time.sleep(0.5)  # Small delay between issue detail fetches
-                        print(
-                            "  Finished fetching details and checking PRs (if applicable)."
+                        logger.info(
+                            "Finished fetching details and checking PRs (if applicable)."
                         )
 
                 else:  # No issue rows found initially
                     # No issue rows found, check if the "no results" message is visible
                     no_results_element = page.locator(self._NO_RESULTS_SELECTOR)
                     if no_results_element.is_visible():
-                        print("[BrowserChecker] 'No results' message is visible.")
+                        logger.info("BrowserChecker: 'No results' message is visible.")
                     else:
-                        print(
-                            "[yellow][BrowserChecker] Neither issue rows nor 'no results' message were visible after waiting."
+                        logger.warning(
+                            "BrowserChecker: Neither issue rows nor 'no results' message were visible after waiting."
                         )
-                    # found_issue_flag = False # Removed unused variable assignment
 
             except PlaywrightTimeoutError:
-                print(
-                    f"[yellow][BrowserChecker] Timeout waiting for issue results container for {repo_full_name}. Assuming no matching issues."
+                logger.warning(
+                    f"BrowserChecker: Timeout waiting for issue results container for {repo_full_name}. Assuming no matching issues."
                 )
-                found_issue_flag = False
+                # No action needed on flags, handled by final check
             except PlaywrightError as pe:
-                print(
-                    f"[yellow][BrowserChecker] Playwright error checking results for {repo_full_name}: {pe}. Assuming no matching issues."
+                logger.warning(
+                    f"BrowserChecker: Playwright error checking results for {repo_full_name}: {pe}. Assuming no matching issues."
                 )
-                # found_issue_flag = False # Removed unused variable assignment
+                # No action needed on flags, handled by final check
 
         except PlaywrightTimeoutError:
-            print(
-                f"[red][BrowserChecker] Timeout error during navigation or interaction for {repo_full_name}."
+            logger.error(
+                f"BrowserChecker: Timeout error during navigation or interaction for {repo_full_name}."
             )
-            # found_issue_flag = False # Removed unused variable assignment
+            # No action needed on flags, handled by final check
         except PlaywrightError as pe:
-            print(
-                f"[red][BrowserChecker] Playwright error during check for {repo_full_name}: {pe}"
+            logger.error(
+                f"BrowserChecker: Playwright error during check for {repo_full_name}: {pe}"
             )
-            # found_issue_flag = False # Removed unused variable assignment
+            # No action needed on flags, handled by final check
         except Exception as e:
-            print(
-                f"[red][BrowserChecker] Unexpected error checking {repo_full_name}: {e}"
+            logger.exception(
+                f"BrowserChecker: Unexpected error checking {repo_full_name}: {e}"
             )
-            # found_issue_flag = False # Removed unused variable assignment
+            # No action needed on flags, handled by final check
         finally:
             if page:
                 try:
                     page.close()
                 except Exception as e:
-                    print(f"[yellow][BrowserChecker] Error closing page: {e}")
+                    logger.warning(f"BrowserChecker: Error closing page: {e}")
             # Add delay regardless of success/failure to slow down requests
-            # print(f"[BrowserChecker] Waiting {self.check_delay:.1f}s before next check...")
+            # logger.debug(f"BrowserChecker: Waiting {self.check_delay:.1f}s before next check...")
             time.sleep(self.check_delay)
 
         # Return True only if the *final* list of details is non-empty
         final_found_flag = bool(found_issues_details)
         return final_found_flag, found_issues_details
+
+    def scrape_readme_text(self, repo_url: str) -> Optional[str]:
+        """
+        Navigates to the repository URL and scrapes the text content of the README.
+
+        Args:
+            repo_url: The full URL to the repository's main page.
+
+        Returns:
+            The text content of the README, or None if not found or an error occurs.
+        """
+        if not self._browser or not self._playwright:
+            logger.error(
+                "BrowserChecker: Playwright/Browser not initialized. Cannot scrape README."
+            )
+            return None
+
+        page = None
+        readme_selector = "article.markdown-body"  # Selector for the README content
+
+        try:
+            logger.info(f"BrowserChecker: Getting new page for README: {repo_url}...")
+            page = self._get_new_page()
+            logger.info(f"BrowserChecker: Navigating to {repo_url}...")
+            page.goto(repo_url, wait_until="domcontentloaded", timeout=self.timeout)
+            logger.info("BrowserChecker: Navigation successful.")
+
+            logger.info(
+                f"BrowserChecker: Waiting for README selector: '{readme_selector}'..."
+            )
+            # Wait for the README container to be visible
+            readme_element = page.locator(readme_selector).first
+            readme_element.wait_for(state="visible", timeout=self.timeout)
+            logger.info("BrowserChecker: README element located.")
+
+            # Extract text content
+            readme_text = readme_element.text_content(timeout=self.timeout / 2)
+            logger.info(
+                f"BrowserChecker: README text extracted (length: {len(readme_text or '')})."
+            )
+            return readme_text.strip() if readme_text else None
+
+        except PlaywrightTimeoutError:
+            logger.warning(f"BrowserChecker: Timeout waiting for README on {repo_url}")
+            return None
+        except PlaywrightError as pe:
+            logger.error(
+                f"BrowserChecker: Playwright error scraping README from {repo_url}: {pe}"
+            )
+            return None
+        except Exception as e:
+            logger.exception(
+                f"BrowserChecker: Unexpected error scraping README from {repo_url}: {e}"
+            )
+            # traceback.print_exc() # logger.exception includes traceback
+            return None
+        finally:
+            if page:
+                try:
+                    page.close()
+                except Exception as e:
+                    logger.warning(
+                        f"BrowserChecker: Error closing page after README scrape: {e}"
+                    )
+            # Add delay? Maybe not needed for a single scrape like this unless called rapidly.
+            # time.sleep(self.check_delay)
 
 
 # Example Usage (for testing)
@@ -499,11 +574,14 @@ if __name__ == "__main__":
     with checker:  # Use context manager
         has_issues, issue_details = (
             checker.check_repo_for_issue_label(  # Renamed variable here
-                repo_to_check, label_to_check
+                repo_to_check,
+                label_to_check,
+                max_linked_prs=0,  # Test the PR exclusion
             )
         )
+        # Use standard print for example output, or configure logging for example run
         print(
-            f"\nCheck result for {repo_to_check} with label '{label_to_check}': Found={has_issues}"
+            f"\nCheck result for {repo_to_check} with label '{label_to_check}' (excluding linked PRs): Found={has_issues}"
         )
         if issue_details:
             print("  Issue Details:")
@@ -512,7 +590,7 @@ if __name__ == "__main__":
                 print(f"      Title: {issue['title'][:80]}...")
                 # print(f"      Desc: {issue['description'][:100]}...") # Can be long
         elif has_issues:
-            print("  (Issues found, but details could not be fetched)")
+            print("  (Issues found, but details could not be fetched or all had PRs)")
 
         # Test another one (e.g., a repo likely without the label)
         repo_to_check_neg = "octocat/Spoon-Knife"
@@ -528,3 +606,17 @@ if __name__ == "__main__":
         # Test another label on the first repo
         # result = checker.check_repo_for_issue_label("microsoft/vscode", "help wanted")
         # print(f"\nCheck result for microsoft/vscode with label 'help wanted': {result}")
+
+        # --- Test README Scraping ---
+        print("\n" + "=" * 20 + " Testing README Scraping " + "=" * 20)
+        # repo_to_scrape = "https://github.com/aio-libs/aiohttp"
+        repo_to_scrape = "https://github.com/pytorch/executorch"  # Use the example repo
+        readme_content = checker.scrape_readme_text(repo_to_scrape)
+        if readme_content:
+            print(f"\nSuccessfully scraped README from {repo_to_scrape}:")
+            print(f"Length: {len(readme_content)}")
+            print("-" * 10 + " Start of README " + "-" * 10)
+            print(readme_content[:1000] + "...")  # Print first 1000 chars
+            print("-" * 10 + " End of README " + "-" * 10)
+        else:
+            print(f"\nFailed to scrape README from {repo_to_scrape}")

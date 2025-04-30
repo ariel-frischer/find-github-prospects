@@ -11,6 +11,9 @@ from urlextract import URLExtract
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-1.5-pro-preview-0409")
 MAX_CONTENT_LENGTH_FOR_SUMMARY = 200000  # Limit input to summarizer LLM
 
+# Get logger for this module
+logger = logging.getLogger(__name__)
+
 
 def _extract_urls(text: str) -> List[str]:
     """Extracts URLs from a given block of text."""
@@ -20,25 +23,25 @@ def _extract_urls(text: str) -> List[str]:
         # Optional: Add filtering here (e.g., ignore github.com URLs, common image hosts?)
         return list(set(urls))  # Return unique URLs
     except Exception as e:
-        logging.warning(f"URL extraction failed: {e}", exc_info=True)
+        logger.warning(f"URL extraction failed: {e}", exc_info=True)
         return []
 
 
 def _scrape_url_content(url: str) -> Optional[str]:
     """Scrapes the main text content from a URL using Goose."""
     try:
-        logging.info(f"    Attempting to scrape URL: {url}")
+        logger.info(f"Attempting to scrape URL: {url}")
         g = Goose()
         article = g.extract(url=url)
         main_text = article.cleaned_text
         if main_text:
-            logging.info(f"    Successfully scraped content from URL: {url}")
+            logger.info(f"Successfully scraped content from URL: {url}")
             return main_text
         else:
-            logging.info(f"    No significant text content found at URL: {url}")
+            logger.info(f"No significant text content found at URL: {url}")
             return None
     except Exception as e:
-        logging.warning(f"    Failed to scrape URL {url}: {e}", exc_info=False)
+        logger.warning(f"Failed to scrape URL {url}: {e}", exc_info=False)
         return None
 
 
@@ -47,7 +50,7 @@ def _summarize_content(
 ) -> Optional[str]:
     """Summarizes the scraped content using an LLM, focusing on relevance to the issue."""
     try:
-        logging.info(f"    Attempting to summarize content from URL: {url}")
+        logger.info(f"Attempting to summarize content from URL: {url}")
         # Truncate content if necessary and add indicator
         truncated_content = content[:MAX_CONTENT_LENGTH_FOR_SUMMARY]
         if len(content) > MAX_CONTENT_LENGTH_FOR_SUMMARY:
@@ -64,25 +67,27 @@ def _summarize_content(
         {truncated_content}
 
         ---
-        Task: Summarize the above 'Content from linked URL' in 1-2 sentences, focusing *only* on aspects relevant to the 'Original GitHub Issue Title' and 'Original GitHub Issue Body'. If the content is irrelevant, state that clearly (e.g., "Content is irrelevant to the issue.").
+        Task: Summarize the above 'Content from linked URL', focusing *only* on aspects relevant to the 'Original GitHub Issue Title' and 'Original GitHub Issue Body'. If the content is irrelevant, state that clearly (e.g., "Content is irrelevant to the issue.").
         """
         # Call LLM for summarization
         response = litellm.completion(
             model=LLM_MODEL,  # Use configured model
             messages=[{"role": "user", "content": summarization_prompt}],
-            max_tokens=150,  # Keep summaries concise
-            temperature=0.2,  # Low temperature for factual summary
+            # max_tokens=150,  # Keep summaries concise
+            # temperature=0.2,  # Low temperature for factual summary
         )
+        # response_cost = getattr(response, "response_cost", None) # Removed print
+        # print(f"response_cost={response_cost}") # Removed print
         summary = response.choices[0].message.content.strip()
         if summary:
-            logging.info(f"    Successfully summarized URL: {url}")
+            logger.info(f"Successfully summarized URL: {url}")
             return summary
         else:
-            logging.warning(f"    LLM returned empty summary for URL: {url}")
+            logger.warning(f"LLM returned empty summary for URL: {url}")
             return None
     except Exception as e:
-        logging.warning(
-            f"    LLM summarization failed for URL {url}: {e}", exc_info=True
+        logger.warning(
+            f"LLM summarization failed for URL {url}: {e}", exc_info=True
         )
         return None
 
@@ -106,8 +111,8 @@ def process_urls_for_issue(
     url_summaries: List[Dict[str, str]] = []
     try:
         urls = _extract_urls(combined_text)
-        logging.info(
-            f"  Found {len(urls)} unique URLs in issue {issue_url_for_logging}"
+        logger.info(
+            f"Found {len(urls)} unique URLs in issue {issue_url_for_logging}"
         )
 
         if not urls:
@@ -116,7 +121,7 @@ def process_urls_for_issue(
         for url in urls:
             # Optional: Add more robust URL filtering here if needed
             if "github.com" in url:  # Example: Skip GitHub links for now
-                logging.info(f"    Skipping GitHub URL: {url}")
+                logger.info(f"Skipping GitHub URL: {url}")
                 continue
 
             content = _scrape_url_content(url)
@@ -128,12 +133,12 @@ def process_urls_for_issue(
             # time.sleep(0.5) # Consider adding if hitting rate limits
 
     except Exception as e:
-        logging.error(
-            f"  Error during URL processing for issue {issue_url_for_logging}: {e}",
+        logger.error(
+            f"Error during URL processing for issue {issue_url_for_logging}: {e}",
             exc_info=True,
         )
     finally:
-        logging.info(
-            f"  Finished URL processing for {issue_url_for_logging}. Found {len(url_summaries)} relevant summaries."
+        logger.info(
+            f"Finished URL processing for {issue_url_for_logging}. Found {len(url_summaries)} relevant summaries."
         )
         return url_summaries

@@ -13,9 +13,7 @@ console = Console()
 # Removed to_markdown, to_jsonl (old version), to_csv
 
 
-def save_enriched_data(
-    enriched_data: List[Dict[str, Any]], outfile: Path
-) -> None:
+def save_enriched_data(enriched_data: List[Dict[str, Any]], outfile: Path) -> None:
     """
     Saves the enriched repository data (including issue analysis) to a JSON Lines file.
 
@@ -25,11 +23,13 @@ def save_enriched_data(
         outfile: The Path object representing the output JSONL file.
     """
     if not enriched_data:
-        console.print("[yellow]No enriched data provided, skipping output file creation.")
+        console.print(
+            "[yellow]No enriched data provided, skipping output file creation."
+        )
         return
 
     try:
-        outfile.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
+        outfile.parent.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
         with outfile.open("w", encoding="utf-8") as f:
             for item in enriched_data:
                 # Ensure complex objects (like datetime if they were present) are serializable
@@ -40,5 +40,6 @@ def save_enriched_data(
         console.print(f"[green]Saved enriched data (JSONL) → {outfile}")
     except Exception as e:
         console.print(f"[red]Error writing enriched JSONL file {outfile}: {e}")
+
 
 # Removed the old save_summary function

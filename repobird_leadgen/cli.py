@@ -2,17 +2,18 @@ import json
 import os  # Needed for permission checks
 import shutil
 import tempfile
-import traceback  # For printing stack traces on error
+import logging  # Import logging
+import traceback
 import webbrowser
-from datetime import datetime  # Import datetime
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set  # Added Dict, Any
+from typing import Any, Dict, List, Optional, Set
 
 import typer
 
 # Remove unused GitHub specific imports if not needed for rehydration anymore
 # from github import GithubException, RateLimitExceededException, Repository
-from rich import print
+# from rich import print # Remove direct print import
 
 from .config import CACHE_DIR, CONCURRENCY, OUTPUT_DIR
 
@@ -23,7 +24,11 @@ from .enricher import enrich_repo_entry  # Import the parallel processing helper
 from .github_search import GitHubSearcher
 
 # Import new models and summarizer function
-from .utils import parallel_map_and_save  # Use the new incremental save function
+from .logging_setup import setup_logging  # Import the setup function
+from .utils import parallel_map_and_save
+
+# Get a logger for this module
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     add_completion=False,
@@ -31,17 +36,38 @@ app = typer.Typer(
     rich_markup_mode="markdown",  # Enable rich markup
 )
 
+
+# --- Typer Callback for Logging Setup ---
+@app.callback(invoke_without_command=True)
+def main_callback(
+    ctx: typer.Context,
+    # Add options here if you want to control logging via CLI flags
+    # log_level: str = typer.Option("INFO", help="Set logging level (DEBUG, INFO, WARNING, ERROR)"),
+):
+    """
+    Main callback to setup logging before any command runs.
+    """
+    # Prevent running setup logic if a command is not being invoked (e.g. --help)
+    if ctx.invoked_subcommand is None:
+        return
+
+    # level = getattr(logging, log_level.upper(), logging.INFO)
+    level = logging.INFO # Keep it simple for now
+    command_name = ctx.invoked_subcommand or "main"
+    setup_logging(command_name, level)
+
+
 # --- Helper Functions (Removed old ones) ---
 
 
 def _load_repo_data_from_cache(cache_file: Path) -> List[Dict[str, Any]]:
     """Loads raw repo data dictionaries from a JSONL cache file."""
     if not cache_file.exists():
-        print(f"[red]Cache file not found: {cache_file}")
+        logger.error(f"Cache file not found: {cache_file}")
         raise typer.Exit(code=1)
 
     repo_data_list = []
-    print(f"Loading repository data from cache: {cache_file}")
+    logger.info(f"Loading repository data from cache: {cache_file}")
     try:
         with cache_file.open("r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
@@ -57,22 +83,22 @@ def _load_repo_data_from_cache(cache_file: Path) -> List[Dict[str, Any]]:
                         or "html_url" not in data
                         or "found_issues" not in data
                     ):
-                        print(
-                            f"[yellow]Warning: Skipping invalid/incomplete line {line_num} in cache: {line[:100]}..."
+                        logger.warning(
+                            f"Skipping invalid/incomplete line {line_num} in cache: {line[:100]}..."
                         )
                         continue
                     repo_data_list.append(data)
                 except json.JSONDecodeError:
-                    print(
-                        f"[yellow]Warning: Skipping invalid JSON line {line_num} in cache: {line[:100]}..."
+                    logger.warning(
+                        f"Skipping invalid JSON line {line_num} in cache: {line[:100]}..."
                     )
-        print(
+        logger.info(
             f"Successfully loaded {len(repo_data_list)} repository entries from cache."
         )
         return repo_data_list
     except Exception as e:
-        print(f"[red]Error loading cache file {cache_file}: {e}")
-        traceback.print_exc()
+        logger.exception(f"Error loading cache file {cache_file}: {e}")
+        # traceback.print_exc() # logger.exception includes traceback
         raise typer.Exit(code=1)
 
 
@@ -135,16 +161,16 @@ def search(
     label, prints qualified repos, and saves raw data incrementally to a
     uniquely named JSON Lines (.jsonl) file. Returns the cache file path on success.
     """
-    print("[bold blue]Starting GitHub repository search...[/]")
-    print(f"  Filtering for Label: '{label}'")
-    print(f"  Language: {language}")
-    print(f"  Target Results: {max_results}")
-    print(f"  Min Stars: {min_stars}")
-    print(f"  Pushed within: {recent_days} days")
+    logger.info("Starting GitHub repository search...")
+    logger.info(f"  Filtering for Label: '{label}'")
+    logger.info(f"  Language: {language}")
+    logger.info(f"  Target Results: {max_results}")
+    logger.info(f"  Min Stars: {min_stars}")
+    logger.info(f"  Pushed within: {recent_days} days")
     if max_issue_age_days is not None:
-        print(f"  Max Issue Age: {max_issue_age_days} days")
+        logger.info(f"  Max Issue Age: {max_issue_age_days} days")
     if max_linked_prs is not None:
-        print(f"  Max Linked PRs: {max_linked_prs}")
+        logger.info(f"  Max Linked PRs: {max_linked_prs}")
 
     # Determine default cache file path if not provided
     if cache_file is None:
@@ -168,22 +194,22 @@ def search(
 
         cache_filename = "_".join(filename_parts) + ".jsonl"
         cache_file = cache_dir / cache_filename
-        print(f"  Using parameter-based cache file: {cache_file}")
+        logger.info(f"Using parameter-based cache file: {cache_file}")
     else:
         # Ensure the provided filename also ends with .jsonl for consistency
         if cache_file.suffix != ".jsonl":
-            print(
-                f"[yellow]Warning: Provided cache file '{cache_file}' does not end with '.jsonl'. Appending suffix."
+            logger.warning(
+                f"Provided cache file '{cache_file}' does not end with '.jsonl'. Appending suffix."
             )
             cache_file = cache_file.with_suffix(".jsonl")
-            print(f"  Adjusted cache file path: {cache_file}")
+            logger.info(f"Adjusted cache file path: {cache_file}")
         else:
-            print(f"  Using specified cache file: {cache_file}")
+            logger.info(f"Using specified cache file: {cache_file}")
 
     # --- Load existing repo names from cache ---
     existing_repo_names: Set[str] = set()
     if cache_file.exists():
-        print(f"Loading existing repos from cache: {cache_file}")
+        logger.info(f"Loading existing repos from cache: {cache_file}")
         try:
             with cache_file.open("r", encoding="utf-8") as f_cache_read:
                 for line in f_cache_read:
@@ -197,17 +223,17 @@ def search(
                         if isinstance(data, dict) and repo_name:
                             existing_repo_names.add(repo_name)
                     except json.JSONDecodeError:
-                        print(
-                            f"[yellow]Warning: Skipping invalid JSON line during pre-load: {line[:100]}..."
+                        logger.warning(
+                            f"Skipping invalid JSON line during pre-load: {line[:100]}..."
                         )
-            print(f"Found {len(existing_repo_names)} existing repos in cache.")
+            logger.info(f"Found {len(existing_repo_names)} existing repos in cache.")
         except Exception as e:
-            print(
-                f"[red]Error reading existing cache file {cache_file}: {e}. Proceeding without skipping."
+            logger.error(
+                f"Error reading existing cache file {cache_file}: {e}. Proceeding without skipping."
             )
             existing_repo_names = set()  # Reset on error
     else:
-        print(f"Cache file {cache_file} not found. Starting fresh.")
+        logger.info(f"Cache file {cache_file} not found. Starting fresh.")
     # --- End loading existing repo names ---
 
     newly_added_count = 0  # Changed from repo_count
@@ -233,41 +259,41 @@ def search(
 
         # Final status message based on whether any *new* repos were found/cached
         if newly_added_count > 0:
-            print(
-                f"\n[green]Search complete. Added {newly_added_count} new repo details to → {cache_file}"
+            logger.info(
+                f"Search complete. Added {newly_added_count} new repo details to {cache_file}"
             )
             return cache_file  # Return path for chaining in 'full' command
         else:
             # Check if the file exists and is non-empty (maybe it had old results)
             if cache_file.exists() and cache_file.stat().st_size > 0:
-                print(
-                    f"\n[yellow]Search complete. No *new* repositories matching the criteria were added. Cache file → {cache_file} still contains previous results."
+                logger.warning(
+                    f"Search complete. No *new* repositories matching the criteria were added. Cache file {cache_file} still contains previous results."
                 )
                 return cache_file  # Return existing cache path
             # Check if the file exists but is empty (search ran but found nothing new or old)
             elif cache_file.exists() and cache_file.stat().st_size == 0:
-                print(
-                    f"[yellow]No repositories found matching the criteria. Empty cache file created: {cache_file}"
+                logger.warning(
+                    f"No repositories found matching the criteria. Empty cache file created: {cache_file}"
                 )
                 return None  # Indicate no usable results
             elif not cache_file.exists():
-                print(
-                    "[red]Search process did not create a cache file, likely due to an early error."
+                logger.error(
+                    "Search process did not create a cache file, likely due to an early error."
                 )
                 return None  # Indicate failure
             else:  # Should not happen given above checks, but just in case
-                print(
-                    f"\n[yellow]Search complete. No *new* repositories matching the criteria were added to → {cache_file}"
+                logger.warning(
+                    f"Search complete. No *new* repositories matching the criteria were added to {cache_file}"
                 )
                 return None  # Indicate no usable results
 
     except RuntimeError as e:  # Catch config errors or retry failures
-        print(f"[red]Error during search: {e}")
+        logger.error(f"Error during search: {e}")
         # traceback.print_exc() # Optional: print stack trace for debugging
         raise typer.Exit(code=1)
     except Exception as e:
-        print(f"[red]An unexpected error occurred during search: {e}")
-        traceback.print_exc()
+        logger.exception(f"An unexpected error occurred during search: {e}")
+        # traceback.print_exc() # logger.exception includes traceback
         raise typer.Exit(code=1)
 
 
@@ -305,12 +331,12 @@ def enrich(
     original repo data along with the analysis results to a new JSON Lines file
     in the specified output directory.
     """
-    print("[bold blue]Starting enrichment process (Issue Scraping & Analysis)...[/]")
-    print(f"  Input cache (JSONL): {cache_file}")
-    print(f"  Output directory: {output_dir}")
-    print(f"  Concurrency: {concurrency}")
-    print(
-        f"  LLM Model: {os.getenv('LLM_MODEL', 'openrouter/google/gemini-flash-1.5')}"
+    logger.info("Starting enrichment process (Issue Scraping & Analysis)...")
+    logger.info(f"  Input cache (JSONL): {cache_file}")
+    logger.info(f"  Output directory: {output_dir}")
+    logger.info(f"  Concurrency: {concurrency}")
+    logger.info(
+        f"  LLM Model: {os.getenv('LLM_MODEL', 'gemini/gemini-1.5-pro-preview-0409')}"
     )  # Show model being used
 
     # Ensure output directory exists
@@ -325,13 +351,13 @@ def enrich(
         repo_data_list = _load_repo_data_from_cache(cache_file)
 
         if not repo_data_list:
-            print(
-                "[yellow]No valid repository data found in cache file. Nothing to enrich."
+            logger.warning(
+                "No valid repository data found in cache file. Nothing to enrich."
             )
             raise typer.Exit()
 
         # Process repositories in parallel, saving incrementally
-        print(f"Starting parallel enrichment for {len(repo_data_list)} repositories...")
+        logger.info(f"Starting parallel enrichment for {len(repo_data_list)} repositories...")
         parallel_map_and_save(
             fn=enrich_repo_entry,
             items=repo_data_list,
@@ -343,31 +369,31 @@ def enrich(
         # Since saving is incremental, we don't collect results here.
         # The summary needs to be simpler or derived differently if needed.
         # For now, just confirm completion.
-        print("\nEnrichment Summary:")
-        print(f"  Processing attempted for {len(repo_data_list)} repositories.")
-        print(f"  Results written incrementally to: {output_file}")
+        logger.info("Enrichment Summary:")
+        logger.info(f"  Processing attempted for {len(repo_data_list)} repositories.")
+        logger.info(f"  Results written incrementally to: {output_file}")
         # We could enhance the writer process to count errors/successes if a detailed summary is critical.
 
-        print(
-            f"[bold green]Enrichment process completed. Results saved to → {output_file}[/]"
+        logger.info(
+            f"Enrichment process completed. Results saved to {output_file}"
         )
         return output_file  # Return path for chaining
 
     except FileNotFoundError:
         # Should be caught by _load_repo_data_from_cache or typer
-        print(f"[red]Input cache file not found: {cache_file}")
+        logger.error(f"Input cache file not found: {cache_file}")
         raise typer.Exit(code=1)
     except (
         RuntimeError
     ) as e:  # Catch config errors (e.g., missing API keys detected by LiteLLM)
-        print(f"[red]Runtime Error during enrichment: {e}")
-        print(
-            "[yellow]Hint: Ensure necessary API keys (e.g., OPENROUTER_API_KEY) are set in your environment.[/yellow]"
+        logger.error(f"Runtime Error during enrichment: {e}")
+        logger.warning(
+            "Hint: Ensure necessary API keys (e.g., OPENROUTER_API_KEY) are set in your environment."
         )
         raise typer.Exit(code=1)
     except Exception as e:
-        print(f"[red]An unexpected error occurred during enrichment: {e}")
-        traceback.print_exc()
+        logger.exception(f"An unexpected error occurred during enrichment: {e}")
+        # traceback.print_exc() # logger.exception includes traceback
         raise typer.Exit(code=1)
 
 
@@ -434,7 +460,7 @@ def full_pipeline(
     Uses a temporary file for the intermediate search results unless --keep-cache is specified.
     Outputs a final JSON Lines file with enriched data including issue analysis.
     """
-    print("[bold blue]Starting full pipeline (search -> enrich)...[/]")
+    logger.info("Starting full pipeline (search -> enrich)...")
 
     temp_cache_path = None
     final_output_path = None
@@ -459,7 +485,7 @@ def full_pipeline(
                 filename_parts.append(f"prs_{max_linked_prs}")
             cache_filename = "_".join(filename_parts) + ".jsonl"
             search_cache_path = cache_dir / cache_filename
-            print(f"Using persistent cache file: {search_cache_path}")
+            logger.info(f"Using persistent cache file: {search_cache_path}")
         else:
             # Use a temporary file for the cache between steps
             cache_dir = Path(CACHE_DIR)
@@ -471,7 +497,7 @@ def full_pipeline(
             os.close(fd)  # Close the file descriptor, we just needed the name
             temp_cache_path = Path(temp_path_str)  # Store the path for later cleanup
             search_cache_path = temp_cache_path
-            print(f"Using temporary cache file: {search_cache_path}")
+            logger.info(f"Using temporary cache file: {search_cache_path}")
 
         # --- Search Step ---
         actual_cache_path = search(
@@ -488,14 +514,14 @@ def full_pipeline(
 
         # Check if search succeeded and found results
         if actual_cache_path is None:
-            print(
-                "[yellow]Search step did not yield usable results. Skipping enrichment."
+            logger.warning(
+                "Search step did not yield usable results. Skipping enrichment."
             )
             # No need to raise Exit here, just return, finally will clean up temp file
             return
         elif not actual_cache_path.exists() or actual_cache_path.stat().st_size == 0:
-            print(
-                "[yellow]Search completed but cache file is missing or empty. Skipping enrichment."
+            logger.warning(
+                "Search completed but cache file is missing or empty. Skipping enrichment."
             )
             # No need to raise Exit here, just return, finally will clean up temp file
             return
@@ -510,30 +536,30 @@ def full_pipeline(
         )
 
         if final_output_path:
-            print(
-                f"[bold green]Full pipeline completed successfully. Final output → {final_output_path}[/]"
+            logger.info(
+                f"Full pipeline completed successfully. Final output: {final_output_path}"
             )
         else:
-            print(
-                "[yellow]Full pipeline finished, but enrichment step did not produce an output file.[/]"
+            logger.warning(
+                "Full pipeline finished, but enrichment step did not produce an output file."
             )
 
     except typer.Exit:
         # Propagate exit signals cleanly if raised by search() or enrich()
         raise
     except Exception as e:
-        print(f"[bold red]An error occurred during the full pipeline: {e}[/]")
-        traceback.print_exc()
+        logger.exception(f"An error occurred during the full pipeline: {e}")
+        # traceback.print_exc() # logger.exception includes traceback
         raise typer.Exit(code=1)
     finally:
         # Clean up the temporary cache file if it was created and still exists
         if temp_cache_path and temp_cache_path.exists():
             try:
                 temp_cache_path.unlink()
-                print(f"Cleaned up temporary cache file: {temp_cache_path}")
+                logger.info(f"Cleaned up temporary cache file: {temp_cache_path}")
             except Exception as e:
-                print(
-                    f"[yellow]Warning: Could not delete temporary cache file {temp_cache_path}: {e}"
+                logger.warning(
+                    f"Could not delete temporary cache file {temp_cache_path}: {e}"
                 )
 
 
@@ -541,18 +567,19 @@ def _select_cache_file() -> Optional[Path]:
     """Finds .jsonl files in CACHE_DIR and prompts user to select one."""
     cache_dir = Path(CACHE_DIR)
     if not cache_dir.is_dir():
-        print(f"[red]Cache directory not found: {cache_dir}")
+        logger.error(f"Cache directory not found: {cache_dir}")
         return None
 
-    print(f"Searching for cache files in: {cache_dir}")
+    logger.info(f"Searching for cache files in: {cache_dir}")
     cache_files = sorted(
         cache_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
     )
 
     if not cache_files:
-        print(f"[yellow]No .jsonl cache files found in {cache_dir}.[/yellow]")
+        logger.warning(f"No .jsonl cache files found in {cache_dir}.")
         return None
 
+    # Use Rich print for interactive parts
     print("[bold]Please select a cache file to review:[/bold]")
     for i, file_path in enumerate(cache_files):
         # Show relative path for cleaner display if possible
@@ -560,6 +587,7 @@ def _select_cache_file() -> Optional[Path]:
             display_path = file_path.relative_to(Path.cwd())
         except ValueError:
             display_path = file_path
+        # Use Rich print for interactive parts
         print(
             f"  [cyan]{i + 1}[/]: {display_path} (Modified: {datetime.fromtimestamp(file_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M')})"
         )
@@ -570,14 +598,16 @@ def _select_cache_file() -> Optional[Path]:
                 f"Enter number (1-{len(cache_files)}) or 'q' to quit", type=str
             )
             if choice.lower() == "q":
-                print("Review cancelled.")
+                logger.info("Review cancelled.")
                 return None
             choice_idx = int(choice) - 1
             if 0 <= choice_idx < len(cache_files):
                 return cache_files[choice_idx]
             else:
+                # Use Rich print for interactive parts
                 print("[yellow]Invalid selection. Please try again.[/yellow]")
         except ValueError:
+            # Use Rich print for interactive parts
             print("[yellow]Invalid input. Please enter a number or 'q'.[/yellow]")
 
 
@@ -616,19 +646,19 @@ def review(
 
     # --- Validate selected/provided cache file ---
     if not cache_file.exists():
-        print(f"[red]Error: Cache file not found: {cache_file}")
+        logger.error(f"Error: Cache file not found: {cache_file}")
         raise typer.Exit(code=1)
     if not cache_file.is_file():
-        print(f"[red]Error: Specified path is not a file: {cache_file}")
+        logger.error(f"Error: Specified path is not a file: {cache_file}")
         raise typer.Exit(code=1)
     # Basic read/write permission check (might not be foolproof)
     if not os.access(cache_file, os.R_OK) or not os.access(cache_file.parent, os.W_OK):
-        print(
-            f"[red]Error: Insufficient permissions to read/write cache file or directory: {cache_file}"
+        logger.error(
+            f"Error: Insufficient permissions to read/write cache file or directory: {cache_file}"
         )
         raise typer.Exit(code=1)
 
-    print(f"[bold blue]Starting interactive issue review for:[/bold blue] {cache_file}")
+    logger.info(f"Starting interactive issue review for: {cache_file}")
 
     repos_processed_count = 0
     issues_reviewed_count = 0
@@ -671,24 +701,24 @@ def review(
                         continue
 
                     if data.get("reviewed", False):
-                        print(
-                            f"  [Skipping Repo #{line_num}] Already reviewed: {repo_name}"
+                        logger.info(
+                            f"Skipping Repo #{line_num} (Already reviewed): {repo_name}"
                         )
                         repos_skipped_count += 1
                         outfile.write(line + "\n")  # Write original line
                         continue
 
                     if data.get("denied", False):  # Handle legacy denial flag
-                        print(
-                            f"  [Skipping Repo #{line_num}] Marked as denied (legacy): {repo_name}"
+                        logger.info(
+                            f"Skipping Repo #{line_num} (Marked as denied - legacy): {repo_name}"
                         )
                         repos_skipped_count += 1
                         outfile.write(line + "\n")  # Write original line
                         continue
 
                     if not repo_html_url:
-                        print(
-                            f"  [yellow]Warning:[/yellow] Skipping repo on line {line_num} - missing 'html_url' for {repo_name}."
+                        logger.warning(
+                            f"Skipping repo on line {line_num} - missing 'html_url' for {repo_name}."
                         )
                         error_count += 1
                         outfile.write(line + "\n")  # Write original line
@@ -700,8 +730,8 @@ def review(
 
                     found_issues = data.get("found_issues")
                     if not isinstance(found_issues, list) or not found_issues:
-                        print(
-                            f"  [Skipping Repo #{line_num}] No 'found_issues' list or empty list for {repo_name}. Marking as reviewed."
+                        logger.info(
+                            f"Skipping Repo #{line_num} (No 'found_issues' list or empty list for {repo_name}). Marking as reviewed."
                         )
                         data["reviewed"] = True
                         if "denied" in data:
@@ -714,6 +744,7 @@ def review(
                         continue
 
                     # --- Start Issue Review Loop ---
+                    # Use Rich print for interactive parts
                     print("-" * 20)
                     print(f"Reviewing Repo #{line_num}: [bold cyan]{repo_name}[/]")
                     original_issues = list(
@@ -725,12 +756,13 @@ def review(
 
                     for issue_index, issue_number in enumerate(original_issues, 1):
                         if not isinstance(issue_number, int):
-                            print(
-                                f"    [yellow]Warning:[/yellow] Skipping invalid issue entry: {issue_number}"
+                            logger.warning(
+                                f"Skipping invalid issue entry: {issue_number}"
                             )
                             continue
 
                         issue_url = f"{repo_html_url}/issues/{issue_number}"
+                        # Use Rich print for interactive parts
                         print(
                             f"  Reviewing Issue {issue_index}/{issues_in_repo_count}: [bold magenta]#{issue_number}[/]"
                         )
@@ -740,8 +772,8 @@ def review(
                             try:
                                 webbrowser.open(issue_url)
                             except Exception as wb_err:
-                                print(
-                                    f"    [yellow]Warning:[/yellow] Could not open URL automatically: {wb_err}"
+                                logger.warning(
+                                    f"Could not open URL automatically: {wb_err}"
                                 )
 
                         # --- Prompt for action --- Loop until a non-'o' action is chosen
@@ -756,12 +788,12 @@ def review(
                                 break  # Exit the inner loop if action is not 'o'
 
                             # Handle 'o' action: open URL and re-prompt
-                            print(f"    Opening URL: {issue_url}")
+                            logger.info(f"Opening URL: {issue_url}")
                             try:
                                 webbrowser.open(issue_url)
                             except Exception as wb_err:
-                                print(
-                                    f"    [yellow]Warning:[/yellow] Could not open URL automatically: {wb_err}"
+                                logger.warning(
+                                    f"Could not open URL automatically: {wb_err}"
                                 )
                             # continue is implicit as the while loop condition (action != 'o') is false
 
@@ -775,62 +807,62 @@ def review(
                                 data.setdefault("approved_issues", []).append(
                                     issue_number
                                 )
-                                print(
-                                    f"    [green]Issue #{issue_number} Approved (added to list).[/green]"
+                                logger.info(
+                                    f"Issue #{issue_number} Approved (added to list)."
                                 )
                             else:
-                                print(
-                                    f"    [green]Issue #{issue_number} Approved (already in list).[/green]"
+                                logger.info(
+                                    f"Issue #{issue_number} Approved (already in list)."
                                 )
                             issues_reviewed_count += 1
                         elif action == "n":
                             # Deny: Remove from approved list if it was there, but don't touch found_issues
                             if issue_number in data.get("approved_issues", []):
                                 data["approved_issues"].remove(issue_number)
-                                print(
-                                    f"    [red]Issue #{issue_number} Denied (removed from approved list).[/red]"
+                                logger.info(
+                                    f"Issue #{issue_number} Denied (removed from approved list)."
                                 )
                             else:
-                                print(f"    [red]Issue #{issue_number} Denied.[/red]")
+                                logger.info(f"Issue #{issue_number} Denied.")
                             # Still counts as reviewed
                             issues_denied_count += 1
                             issues_reviewed_count += 1
                         elif action == "s":
-                            print("    [yellow]Issue Skipped.[/yellow]")
+                            logger.info(f"Issue #{issue_number} Skipped.")
                             issues_skipped_count += 1
                             # Move to next issue in this repo
                         elif action == "sr":
-                            print(
-                                f"    [yellow]Skipping remaining issues in {repo_name}...[/yellow]"
+                            logger.warning(
+                                f"Skipping remaining issues in {repo_name}..."
                             )
                             repo_level_skip = True
                             repos_skipped_count += 1
                             repo_skipped_this_line = True
                             break  # Exit inner issue loop
                         elif action == "sa":
-                            print("    [yellow]Skipping all remaining...[/yellow]")
+                            logger.warning("Skipping all remaining...")
                             skip_all_remaining = True
                             repo_level_skip = True
                             repos_skipped_count += 1
                             repo_skipped_this_line = True
                             break  # Exit inner issue loop
                         elif action == "q":
-                            print("    [bold magenta]Quitting review...[/bold magenta]")
+                            logger.info("Quitting review...")
                             # Write current state of data before raising Exit
                             json.dump(data, outfile)
                             outfile.write("\n")
                             # Raise typer.Exit - the finally block will handle saving
                             raise typer.Exit(code=0)  # Use code 0 for clean quit
                         else:
-                            print(
-                                "    [yellow]Invalid action. Treating as Skip Issue.[/yellow]"
+                            logger.warning(
+                                "Invalid action. Treating as Skip Issue."
                             )
                             issues_skipped_count += 1
                             # Move to next issue
 
                     # --- After Issue Loop for Repo ---
                     if repo_level_skip:  # Handle sr, sa first
-                        print(f"  Repo {repo_name} skipped.")
+                        logger.info(f"Repo {repo_name} skipped.")
                         # Write potentially modified data (if some issues were denied before skip)
                         json.dump(data, outfile)
                         outfile.write("\n")
@@ -843,7 +875,7 @@ def review(
                     data["reviewed"] = True
                     if "denied" in data:
                         del data["denied"]  # Clean legacy flag
-                    print(f"  [green]Repo {repo_name} fully reviewed.[/green]")
+                    logger.info(f"Repo {repo_name} fully reviewed.")
                     repos_marked_reviewed_this_session += 1
                     repo_processed_this_line = True  # Mark repo as processed
 
@@ -859,8 +891,8 @@ def review(
                     AttributeError,
                     ValueError,
                 ) as e:
-                    print(
-                        f"  [red]Error processing data on line {line_num}: {e}. Skipping line."
+                    logger.error(
+                        f"Error processing data on line {line_num}: {e}. Skipping line."
                     )
                     error_count += 1
                     outfile.write(line + "\n")  # Write original line back
@@ -874,22 +906,22 @@ def review(
             # If loop finished OR exited via 'q', save progress by moving temp file
             # This needs to be inside the main try block to be caught by outer except/finally
             shutil.move(str(temp_output_path), str(cache_file))
-            print("\n[bold green]Review process finished.[/bold green]")
+            logger.info("Review process finished.")
             if skip_all_remaining:
-                print("  (Skipped remaining items as requested)")
-            print("--- Summary ---")
-            print(f"  Total lines in file: {total_lines}")
-            print(
+                logger.info("  (Skipped remaining items as requested)")
+            logger.info("--- Review Summary ---")
+            logger.info(f"  Total lines in file: {total_lines}")
+            logger.info(
                 f"  Repos skipped (already reviewed/denied/sr/sa): {repos_skipped_count}"
             )
-            print(
+            logger.info(
                 f"  Repos newly marked as reviewed: {repos_marked_reviewed_this_session}"
             )
-            print(f"  Total issues reviewed (approved/denied): {issues_reviewed_count}")
-            print(f"  Issues denied: {issues_denied_count}")  # Updated label
-            print(f"  Issues skipped ('s' action): {issues_skipped_count}")
-            print(f"  Lines with errors: {error_count}")
-            print(f"Updated cache file: {cache_file}")
+            logger.info(f"  Total issues reviewed (approved/denied): {issues_reviewed_count}")
+            logger.info(f"  Issues denied: {issues_denied_count}")  # Updated label
+            logger.info(f"  Issues skipped ('s' action): {issues_skipped_count}")
+            logger.info(f"  Lines with errors: {error_count}")
+            logger.info(f"Updated cache file: {cache_file}")
 
     # --- Outer Try/Except/Finally for the whole command ---
     except typer.Exit as e:  # Correct indentation
@@ -898,42 +930,42 @@ def review(
         exit_code = getattr(e, "code", 0)  # Default to 0 if no code attribute
 
         if exit_code == 0:
-            print("Exited review process cleanly.")
+            logger.info("Exited review process cleanly.")
         else:
-            print(f"Review process exited with code {exit_code}.")
+            logger.warning(f"Review process exited with code {exit_code}.")
             # Consider leaving temp file if exit code indicates error
             if temp_output_path.exists():
-                print(f"Partial results might be in: {temp_output_path}")
+                logger.warning(f"Partial results might be in: {temp_output_path}")
         # Note: The finally block in the outer try/except/finally structure
         # should handle the file move correctly even on Exit.
 
     except KeyboardInterrupt:  # Correct indentation
-        print("\n[bold magenta]Keyboard interrupt detected. Saving progress...[/]")
+        logger.warning("Keyboard interrupt detected. Saving progress...")
         # Attempt to save progress by moving temp file if it exists
         if temp_output_path.exists():
             try:
                 shutil.move(str(temp_output_path), str(cache_file))
-                print(f"Progress saved to: {cache_file}")
+                logger.info(f"Progress saved to: {cache_file}")
             except Exception as move_err:
-                print(f"[red]Error saving progress on interrupt: {move_err}")
-                print(f"Partial results might be in: {temp_output_path}")
+                logger.error(f"Error saving progress on interrupt: {move_err}")
+                logger.warning(f"Partial results might be in: {temp_output_path}")
         else:
-            print("No temporary file found to save.")
+            logger.info("No temporary file found to save.")
         raise typer.Exit(code=130)  # Standard exit code for Ctrl+C
     except Exception as e:  # Correct indentation
-        print(f"\n[bold red]An error occurred during review: {e}[/]")
-        traceback.print_exc()
+        logger.exception(f"An error occurred during review: {e}")
+        # traceback.print_exc() # logger.exception includes traceback
         # Attempt cleanup, but prioritize not losing data
         if temp_output_path.exists():
-            print(
-                f"[yellow]Warning: Review process failed. Partial results might be in {temp_output_path}. Original file {cache_file} remains unchanged."
+            logger.warning(
+                f"Review process failed. Partial results might be in {temp_output_path}. Original file {cache_file} remains unchanged."
             )
             # Consider *not* deleting the temp file automatically on error
             # try:
             #     temp_output_path.unlink()
-            #     print(f"Cleaned up temporary file due to error: {temp_output_path}")
+            #     logger.info(f"Cleaned up temporary file due to error: {temp_output_path}")
             # except Exception as del_err:
-            #     print(f"[yellow]Warning:[/yellow] Could not delete temporary file {temp_output_path} after error: {del_err}")
+            #     logger.warning(f"Could not delete temporary file {temp_output_path} after error: {del_err}")
         raise typer.Exit(code=1)
     finally:
         # Ensure temp file is removed *only if it wasn't successfully moved* and *no major error occurred*
@@ -962,7 +994,7 @@ def post_process(
     If any issue analysis has 'is_good_first_issue_for_agent' set to true, the entire line
     is written to a new output file named 'filtered_<original_name>.jsonl' in the same directory.
     """
-    print(f"[bold blue]Starting post-processing filter on:[/bold blue] {input_file}")
+    logger.info(f"Starting post-processing filter on: {input_file}")
 
     output_file = input_file.parent / f"filtered_{input_file.name}"
     repos_read = 0
@@ -985,8 +1017,8 @@ def post_process(
                     issue_analysis_list = data.get("issue_analysis", [])
 
                     if not isinstance(issue_analysis_list, list):
-                        print(
-                            f"[yellow]Warning: Skipping line {repos_read} - 'issue_analysis' is not a list."
+                        logger.warning(
+                            f"Skipping line {repos_read} - 'issue_analysis' is not a list."
                         )
                         continue
 
@@ -1018,34 +1050,30 @@ def post_process(
                         repos_written += 1
 
                 except json.JSONDecodeError:
-                    print(
-                        f"[yellow]Warning: Skipping line {repos_read} - Invalid JSON."
-                    )
+                    logger.warning(f"Skipping line {repos_read} - Invalid JSON.")
                     errors_parsing += 1
                 except Exception as e:
-                    print(
-                        f"[red]Error processing line {repos_read}: {e}. Skipping line."
-                    )
+                    logger.error(f"Error processing line {repos_read}: {e}. Skipping line.")
                     errors_parsing += 1
 
-        print("\n--- Post-processing Summary ---")
-        print(f"  Total repositories read: {repos_read}")
-        print(f"  Repositories written to filtered file: {repos_written}")
+        logger.info("--- Post-processing Summary ---")
+        logger.info(f"  Total repositories read: {repos_read}")
+        logger.info(f"  Repositories written to filtered file: {repos_written}")
         if errors_parsing > 0:
-            print(f"  [yellow]Lines skipped due to parsing errors: {errors_parsing}")
-        print(f"[bold green]Filtered results saved to → {output_file}[/]")
+            logger.warning(f"  Lines skipped due to parsing errors: {errors_parsing}")
+        logger.info(f"Filtered results saved to {output_file}")
 
     except Exception as e:
-        print(f"[bold red]An error occurred during post-processing: {e}[/]")
-        traceback.print_exc()
+        logger.exception(f"An error occurred during post-processing: {e}")
+        # traceback.print_exc() # logger.exception includes traceback
         # Clean up potentially incomplete output file on error
         if output_file.exists():
             try:
                 output_file.unlink()
-                print(f"[yellow]Removed incomplete output file: {output_file}")
+                logger.warning(f"Removed incomplete output file: {output_file}")
             except Exception as del_err:
-                print(
-                    f"[red]Error removing incomplete output file {output_file}: {del_err}"
+                logger.error(
+                    f"Error removing incomplete output file {output_file}: {del_err}"
                 )
         raise typer.Exit(code=1)
 
