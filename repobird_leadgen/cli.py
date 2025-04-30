@@ -23,8 +23,7 @@ from .enricher import enrich_repo_entry  # Import the parallel processing helper
 from .github_search import GitHubSearcher
 
 # Import new models and summarizer function
-from .summarizer import save_enriched_data  # Use the new save function
-from .utils import parallel_map
+from .utils import parallel_map_and_save  # Use the new incremental save function
 
 app = typer.Typer(
     add_completion=False,
@@ -331,55 +330,23 @@ def enrich(
             )
             raise typer.Exit()
 
-        # Process repositories in parallel using the helper function from enricher.py
+        # Process repositories in parallel, saving incrementally
         print(f"Starting parallel enrichment for {len(repo_data_list)} repositories...")
-        # The enrich_repo_entry function handles Enricher instantiation and context management
-        enriched_results: List[Dict[str, Any]] = parallel_map(
-            enrich_repo_entry,
-            repo_data_list,
+        parallel_map_and_save(
+            fn=enrich_repo_entry,
+            items=repo_data_list,
+            output_file=output_file,
             max_workers=concurrency,
-            desc="Enriching Repos (Scraping & Analyzing Issues)",
+            desc="Enriching Repos (Scraping & Analyzing Issues)",  # Desc for potential future overall progress bar
         )
 
-        # Filter out potential None results if parallel_map allows/returns them on error
-        # Although our current enrich_repo_entry adds an error field instead
-        successful_enrichments = [
-            r for r in enriched_results if r is not None
-        ]  # Basic check
-
-        if not successful_enrichments:
-            print("[red]Enrichment process failed for all repositories.")
-            raise typer.Exit(code=1)
-
-        # Count successes and failures
-        total_processed = len(successful_enrichments)
-        repos_with_errors = sum(
-            1 for r in successful_enrichments if r.get("enrichment_error")
-        )
-        issues_analyzed_count = sum(
-            len(r.get("issue_analysis", [])) for r in successful_enrichments
-        )
-        issues_with_errors = sum(
-            1
-            for r in successful_enrichments
-            for analysis in r.get("issue_analysis", [])
-            if analysis.get("error")
-        )
-
+        # Since saving is incremental, we don't collect results here.
+        # The summary needs to be simpler or derived differently if needed.
+        # For now, just confirm completion.
         print("\nEnrichment Summary:")
-        print(f"  Total repositories processed: {total_processed}")
-        if repos_with_errors > 0:
-            print(
-                f"  [yellow]Repositories with processing errors: {repos_with_errors}[/yellow]"
-            )
-        print(f"  Total issues analyzed (attempted): {issues_analyzed_count}")
-        if issues_with_errors > 0:
-            print(
-                f"  [yellow]Issues with analysis/scraping errors: {issues_with_errors}[/yellow]"
-            )
-
-        # Save the enriched data (list of dictionaries) to JSONL
-        save_enriched_data(successful_enrichments, output_file)
+        print(f"  Processing attempted for {len(repo_data_list)} repositories.")
+        print(f"  Results written incrementally to: {output_file}")
+        # We could enhance the writer process to count errors/successes if a detailed summary is critical.
 
         print(
             f"[bold green]Enrichment process completed. Results saved to → {output_file}[/]"
@@ -968,7 +935,7 @@ def review(
             # except Exception as del_err:
             #     print(f"[yellow]Warning:[/yellow] Could not delete temporary file {temp_output_path} after error: {del_err}")
         raise typer.Exit(code=1)
-    finally:  # Correct indentation
+    finally:
         # Ensure temp file is removed *only if it wasn't successfully moved* and *no major error occurred*
         # This logic is tricky. Let's be conservative and leave the temp file if the move didn't happen
         # unless it was explicitly handled (like in KeyboardInterrupt or normal exit).
@@ -977,5 +944,111 @@ def review(
         pass  # Simplified cleanup logic - rely on move happening correctly
 
 
-if __name__ == "__main__":  # Correct indentation
+@app.command()
+def post_process(
+    input_file: Path = typer.Argument(
+        ...,
+        help="Path to the enriched JSON Lines file (output from the `enrich` command).",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+    ),
+) -> None:
+    """
+    Filters an enriched JSONL file to include only repos with 'good first issues for agent'.
+
+    Reads the input file line by line, checks the 'issue_analysis' list in each line's JSON data.
+    If any issue analysis has 'is_good_first_issue_for_agent' set to true, the entire line
+    is written to a new output file named 'filtered_<original_name>.jsonl' in the same directory.
+    """
+    print(f"[bold blue]Starting post-processing filter on:[/bold blue] {input_file}")
+
+    output_file = input_file.parent / f"filtered_{input_file.name}"
+    repos_read = 0
+    repos_written = 0
+    errors_parsing = 0
+
+    try:
+        with (
+            input_file.open("r", encoding="utf-8") as infile,
+            output_file.open("w", encoding="utf-8") as outfile,
+        ):
+            for line in infile:
+                repos_read += 1
+                line = line.strip()
+                if not line:
+                    continue  # Skip empty lines
+
+                try:
+                    data = json.loads(line)
+                    issue_analysis_list = data.get("issue_analysis", [])
+
+                    if not isinstance(issue_analysis_list, list):
+                        print(
+                            f"[yellow]Warning: Skipping line {repos_read} - 'issue_analysis' is not a list."
+                        )
+                        continue
+
+                    found_good_issue = False
+                    for issue_analysis in issue_analysis_list:
+                        if (
+                            isinstance(issue_analysis, dict)
+                            and issue_analysis.get("is_good_first_issue_for_agent")
+                            is True
+                        ):
+                            found_good_issue = True
+                            break  # Found one, no need to check further in this repo
+
+                    # If at least one good issue was found, filter the list and write modified data
+                    if found_good_issue:
+                        # Create a new list containing only the good issues
+                        filtered_issue_analysis = [
+                            issue
+                            for issue in issue_analysis_list
+                            if isinstance(issue, dict)
+                            and issue.get("is_good_first_issue_for_agent") is True
+                        ]
+
+                        # Modify the original data structure to only include the filtered issues
+                        data["issue_analysis"] = filtered_issue_analysis
+
+                        # Write the modified data as a JSON line
+                        outfile.write(json.dumps(data) + "\n")
+                        repos_written += 1
+
+                except json.JSONDecodeError:
+                    print(
+                        f"[yellow]Warning: Skipping line {repos_read} - Invalid JSON."
+                    )
+                    errors_parsing += 1
+                except Exception as e:
+                    print(
+                        f"[red]Error processing line {repos_read}: {e}. Skipping line."
+                    )
+                    errors_parsing += 1
+
+        print("\n--- Post-processing Summary ---")
+        print(f"  Total repositories read: {repos_read}")
+        print(f"  Repositories written to filtered file: {repos_written}")
+        if errors_parsing > 0:
+            print(f"  [yellow]Lines skipped due to parsing errors: {errors_parsing}")
+        print(f"[bold green]Filtered results saved to → {output_file}[/]")
+
+    except Exception as e:
+        print(f"[bold red]An error occurred during post-processing: {e}[/]")
+        traceback.print_exc()
+        # Clean up potentially incomplete output file on error
+        if output_file.exists():
+            try:
+                output_file.unlink()
+                print(f"[yellow]Removed incomplete output file: {output_file}")
+            except Exception as del_err:
+                print(
+                    f"[red]Error removing incomplete output file {output_file}: {del_err}"
+                )
+        raise typer.Exit(code=1)
+
+
+if __name__ == "__main__":
     app()

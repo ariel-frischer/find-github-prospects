@@ -72,4 +72,27 @@ review:
 	@echo "Running review command..."
 	$(VENV_RUN) repobird-leadgen review $(ARGS)
 
-.PHONY: install-dev fix test install-browsers run run-browser update-cache aider aider-test enrich review
+# Run the post-processing filter on an enriched file
+# Usage: make post-process FILE=output/enriched_*.jsonl
+post-process:
+	@echo "Running post-processing filter on file: $(FILE)"
+	@if [ -z "$(FILE)" ]; then \
+		echo "[Error] FILE argument must be set. Example:"; \
+		echo "make post-process FILE=output/enriched_your_file.jsonl"; \
+		exit 1; \
+	fi
+	$(VENV_RUN) repobird-leadgen post-process "$(FILE)"
+
+# Run the PR filter script on an enriched/filtered file (modifies in-place)
+# Usage: make filter-prs FILE=output/enriched_*.jsonl
+# Usage: make filter-prs FILE=output/filtered_*.jsonl
+filter-prs:
+	@echo "Running PR filter script on file (will modify in-place): $(FILE)"
+	@if [ -z "$(FILE)" ]; then \
+		echo "[Error] FILE argument must be set. Example:"; \
+		echo "make filter-prs FILE=output/your_file.jsonl"; \
+		exit 1; \
+	fi
+	$(VENV_RUN) python scripts/filter_issues_by_prs.py "$(FILE)"
+
+.PHONY: install-dev fix test install-browsers run run-browser update-cache aider aider-test enrich review post-process filter-prs
