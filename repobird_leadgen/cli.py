@@ -6,19 +6,24 @@ import traceback  # For printing stack traces on error
 import webbrowser
 from datetime import datetime  # Import datetime
 from pathlib import Path
-from typing import List, Optional, Set  # Added Set
+from typing import Any, Dict, List, Optional, Set  # Added Dict, Any
 
 import typer
-from github import GithubException, RateLimitExceededException, Repository
+
+# Remove unused GitHub specific imports if not needed for rehydration anymore
+# from github import GithubException, RateLimitExceededException, Repository
 from rich import print
 
-from .config import CACHE_DIR, CONCURRENCY, OUTPUT_DIR  # Use config for dirs
-from .contact_scraper import ContactScraper
+from .config import CACHE_DIR, CONCURRENCY, OUTPUT_DIR
 
+# Remove ContactScraper import
+# from .contact_scraper import ContactScraper
 # Import local modules
+from .enricher import enrich_repo_entry  # Import the parallel processing helper
 from .github_search import GitHubSearcher
-from .models import RepoSummary
-from .summarizer import save_summary  # Use the unified save function
+
+# Import new models and summarizer function
+from .summarizer import save_enriched_data  # Use the new save function
 from .utils import parallel_map
 
 app = typer.Typer(
@@ -27,149 +32,49 @@ app = typer.Typer(
     rich_markup_mode="markdown",  # Enable rich markup
 )
 
-# --- Helper Functions ---
+# --- Helper Functions (Removed old ones) ---
 
 
-def _load_repos_from_cache(
-    cache_file: Path, gh_instance: GitHubSearcher
-) -> List[Repository]:
-    """Loads raw repo data from a JSONL cache file and rehydrates Repository objects."""
+def _load_repo_data_from_cache(cache_file: Path) -> List[Dict[str, Any]]:
+    """Loads raw repo data dictionaries from a JSONL cache file."""
     if not cache_file.exists():
         print(f"[red]Cache file not found: {cache_file}")
         raise typer.Exit(code=1)
 
-    repos = []
-    raw_repo_count = 0
-    print(f"Loading repositories from cache: {cache_file}")
+    repo_data_list = []
+    print(f"Loading repository data from cache: {cache_file}")
     try:
         with cache_file.open("r", encoding="utf-8") as f:
-            for line in f:
-                raw_repo_count += 1
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
-                    continue  # Skip empty lines
+                    continue
                 try:
-                    r_data = json.loads(line)
-                    if not isinstance(r_data, dict) or "full_name" not in r_data:
+                    data = json.loads(line)
+                    # Basic validation: check if it's a dict and has essential keys
+                    if (
+                        not isinstance(data, dict)
+                        or "full_name" not in data
+                        or "html_url" not in data
+                        or "found_issues" not in data
+                    ):
                         print(
-                            f"[yellow]Warning: Skipping invalid line in cache: {line[:100]}..."
+                            f"[yellow]Warning: Skipping invalid/incomplete line {line_num} in cache: {line[:100]}..."
                         )
                         continue
-
-                    # Rehydrate using the authenticated Github object from GitHubSearcher
-                    # Apply retry logic here as well, though less critical than search/enrich
-                    # Using the internal retry mechanism of GitHubSearcher if available,
-                    # otherwise a simple retry. Let's assume gh_instance has _execute_with_retry
-                    repo = gh_instance._execute_with_retry(  # Use gh_instance here
-                        gh_instance.gh.get_repo,
-                        r_data["full_name"],  # And here
-                    )
-                    repos.append(repo)
-
+                    repo_data_list.append(data)
                 except json.JSONDecodeError:
                     print(
-                        f"[yellow]Warning: Skipping invalid JSON line in cache: {line[:100]}..."
+                        f"[yellow]Warning: Skipping invalid JSON line {line_num} in cache: {line[:100]}..."
                     )
-                except RateLimitExceededException:
-                    # Should be handled by _execute_with_retry now
-                    print("[yellow]Rate limit hit during repo rehydration. Retrying...")
-                    # The retry logic should handle waiting
-                except GithubException as e:
-                    # Handled by retry logic, but log if it ultimately fails
-                    print(
-                        f"[yellow]Warning: Could not rehydrate repo {r_data.get('full_name', 'Unknown')} after retries: {e.status} {e.data}. Skipping."
-                    )
-                except Exception as e:
-                    # Catch unexpected errors during rehydration of a single repo
-                    print(
-                        f"[yellow]Warning: Unexpected error rehydrating repo {r_data.get('full_name', 'Unknown')}: {e}. Skipping."
-                    )
-
         print(
-            f"Successfully rehydrated {len(repos)} out of {raw_repo_count} entries from cache."
+            f"Successfully loaded {len(repo_data_list)} repository entries from cache."
         )
-        return repos
-
+        return repo_data_list
     except Exception as e:
-        # Catch errors opening/reading the file itself
         print(f"[red]Error loading cache file {cache_file}: {e}")
         traceback.print_exc()
         raise typer.Exit(code=1)
-
-
-def _process_repo_for_summary(
-    repo: Repository, scraper: ContactScraper
-) -> Optional[RepoSummary]:
-    """Processes a single repo to extract info and contacts for the summary."""
-    try:
-        # Fetch necessary attributes first to handle potential errors gracefully
-        full_name = repo.full_name
-        description = repo.description or ""
-        stars = repo.stargazers_count
-        language = repo.language
-        open_issues = repo.open_issues_count
-        last_push = repo.pushed_at
-
-        # These calls can be slow or hit rate limits
-        try:
-            # Use search_issues for potentially better filtering and counting
-            good_first_issues = repo.get_issues(
-                state="open", labels=["good first issue"]
-            ).totalCount
-        except GithubException as e:
-            print(
-                f"[yellow]Warning: Could not get 'good first issue' count for {full_name}: {e.status}. Setting to 0."
-            )
-            good_first_issues = 0
-        except Exception as e:
-            print(
-                f"[yellow]Warning: Unexpected error getting 'good first issue' count for {full_name}: {e}. Setting to 0."
-            )
-            good_first_issues = 0
-
-        try:
-            help_wanted_issues = repo.get_issues(
-                state="open", labels=["help wanted"]
-            ).totalCount
-        except GithubException as e:
-            print(
-                f"[yellow]Warning: Could not get 'help wanted' count for {full_name}: {e.status}. Setting to 0."
-            )
-            help_wanted_issues = 0
-        except Exception as e:
-            print(
-                f"[yellow]Warning: Unexpected error getting 'help wanted' count for {full_name}: {e}. Setting to 0."
-            )
-            help_wanted_issues = 0
-
-        # Scrape contact info
-        contact = scraper.extract(repo)
-
-        return RepoSummary(
-            full_name=full_name,
-            description=description,
-            stars=stars,
-            language=language,
-            open_issues=open_issues,
-            good_first_issues=good_first_issues,
-            help_wanted_issues=help_wanted_issues,
-            last_push=last_push,
-            contact=contact,
-        )
-    except RateLimitExceededException:
-        print(
-            f"[yellow]Rate limit hit processing repo {repo.full_name}. Skipping for now."
-        )
-        # Re-raise or handle differently if needed
-        return None  # Skip this repo in parallel map
-    except GithubException as e:
-        print(
-            f"[yellow]Warning: GitHub error processing repo {repo.full_name}: {e.status} {e.data}. Skipping."
-        )
-        return None
-    except Exception as e:
-        print(f"[red]Unexpected error processing repo {repo.full_name}: {e}. Skipping.")
-        return None
 
 
 # --- CLI Commands ---
@@ -215,13 +120,13 @@ def search(
         None,
         "--cache-file",
         "-c",
-        help=f"File to save raw repository JSON Lines data. Defaults to '[{CACHE_DIR}]/raw_repos_<label>_<lang>_<run_id>.jsonl'",
+        help=f"File to save raw repository JSON Lines data. Defaults to '[{CACHE_DIR}]/raw_repos_... .jsonl'",
     ),
     use_browser_checker: bool = typer.Option(
         False,
         "--use-browser-checker",
-        help="Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.",
-        is_flag=True,  # Make it a flag like --use-browser-checker
+        help="[Search Phase] Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.",
+        is_flag=True,
     ),
 ) -> Optional[Path]:
     """
@@ -371,97 +276,130 @@ def search(
 def enrich(
     cache_file: Path = typer.Argument(
         ...,
-        help="JSON Lines (.jsonl) cache file produced by the `search` command.",
+        help="JSON Lines (.jsonl) cache file produced by the `search` command containing repo data.",
         exists=True,
         file_okay=True,
         dir_okay=False,
         readable=True,
     ),
-    output_formats: List[str] = typer.Option(
-        ["md", "jsonl"], "--format", "-f", help="Output format(s): md, jsonl, csv."
-    ),
     output_dir: Path = typer.Option(
         OUTPUT_DIR,
         "--output-dir",
         "-o",
-        help="Directory to save the final summary files.",
+        help="Directory to save the enriched data file.",
+        writable=True,  # Ensure we can write here
     ),
     concurrency: int = typer.Option(
         CONCURRENCY,
         "--concurrency",
         "-w",
-        help="Number of parallel workers for fetching details.",
+        help="Number of parallel workers for scraping and analyzing issues.",
     ),
-) -> None:
+    # Add option to skip Playwright install check? Maybe not needed.
+    # Add option for LLM model? Use env var for now.
+) -> Optional[Path]:
     """
-    Enrich cached repo data with contact info, stats, and save summaries.
+    Enrich cached repo data by scraping and analyzing GitHub issues using Playwright and LLM.
 
-    Reads a JSON Lines file (from `search`), fetches additional details,
-    scrapes contacts, and generates summary files (Markdown, JSONL, CSV).
+    Reads a JSON Lines file (from `search`), scrapes content for each issue listed
+    in `found_issues`, analyzes it using an LLM (via LiteLLM), and saves the
+    original repo data along with the analysis results to a new JSON Lines file
+    in the specified output directory.
     """
-    print("[bold blue]Starting enrichment process...[/]")
+    print("[bold blue]Starting enrichment process (Issue Scraping & Analysis)...[/]")
     print(f"  Input cache (JSONL): {cache_file}")
-    print(f"  Output formats: {', '.join(output_formats)}")
     print(f"  Output directory: {output_dir}")
     print(f"  Concurrency: {concurrency}")
+    print(
+        f"  LLM Model: {os.getenv('LLM_MODEL', 'openrouter/google/gemini-flash-1.5')}"
+    )  # Show model being used
 
-    valid_formats = {"md", "markdown", "jsonl", "csv"}
-    for fmt in output_formats:
-        if fmt.lower() not in valid_formats:
-            print(f"[red]Invalid output format: '{fmt}'. Choose from: md, jsonl, csv.")
-            raise typer.Exit(code=1)
+    # Ensure output directory exists
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Define output file path
+    output_filename = f"enriched_{cache_file.stem}.jsonl"
+    output_file = output_dir / output_filename
 
     try:
-        # Need GitHubSearcher to access the authenticated Github object for rehydration
-        # and its retry mechanism if available
-        gh_searcher = GitHubSearcher()
-        scraper = ContactScraper()
+        # Load raw repo data dictionaries from the cache file
+        repo_data_list = _load_repo_data_from_cache(cache_file)
 
-        # Load and rehydrate repos from JSONL cache
-        repos = _load_repos_from_cache(cache_file, gh_searcher)
-
-        if not repos:
+        if not repo_data_list:
             print(
-                "[yellow]No repositories successfully loaded from cache. Nothing to enrich."
+                "[yellow]No valid repository data found in cache file. Nothing to enrich."
             )
             raise typer.Exit()
 
-        # Define the processing function for parallel_map
-        def process_repo_wrapper(repo: Repository) -> Optional[RepoSummary]:
-            # Need to pass the scraper instance
-            return _process_repo_for_summary(repo, scraper)
-
-        # Process repositories in parallel
-        print(f"Fetching details and contacts for {len(repos)} repositories...")
-        summaries: List[RepoSummary] = parallel_map(
-            process_repo_wrapper, repos, max_workers=concurrency, desc="Enriching repos"
+        # Process repositories in parallel using the helper function from enricher.py
+        print(f"Starting parallel enrichment for {len(repo_data_list)} repositories...")
+        # The enrich_repo_entry function handles Enricher instantiation and context management
+        enriched_results: List[Dict[str, Any]] = parallel_map(
+            enrich_repo_entry,
+            repo_data_list,
+            max_workers=concurrency,
+            desc="Enriching Repos (Scraping & Analyzing Issues)",
         )
 
-        # Filter out None results from potential errors during parallel processing
-        successful_summaries = [s for s in summaries if s is not None]
+        # Filter out potential None results if parallel_map allows/returns them on error
+        # Although our current enrich_repo_entry adds an error field instead
+        successful_enrichments = [
+            r for r in enriched_results if r is not None
+        ]  # Basic check
 
-        if not successful_summaries:
-            print("[yellow]No repositories could be successfully processed.")
-            raise typer.Exit()
+        if not successful_enrichments:
+            print("[red]Enrichment process failed for all repositories.")
+            raise typer.Exit(code=1)
 
-        print(f"Successfully processed {len(successful_summaries)} repositories.")
+        # Count successes and failures
+        total_processed = len(successful_enrichments)
+        repos_with_errors = sum(
+            1 for r in successful_enrichments if r.get("enrichment_error")
+        )
+        issues_analyzed_count = sum(
+            len(r.get("issue_analysis", [])) for r in successful_enrichments
+        )
+        issues_with_errors = sum(
+            1
+            for r in successful_enrichments
+            for analysis in r.get("issue_analysis", [])
+            if analysis.get("error")
+        )
 
-        # Save summaries in requested formats
-        save_summary(successful_summaries, str(output_dir), output_formats)
+        print("\nEnrichment Summary:")
+        print(f"  Total repositories processed: {total_processed}")
+        if repos_with_errors > 0:
+            print(
+                f"  [yellow]Repositories with processing errors: {repos_with_errors}[/yellow]"
+            )
+        print(f"  Total issues analyzed (attempted): {issues_analyzed_count}")
+        if issues_with_errors > 0:
+            print(
+                f"  [yellow]Issues with analysis/scraping errors: {issues_with_errors}[/yellow]"
+            )
 
-        print("[bold green]Enrichment process completed.[/]")
+        # Save the enriched data (list of dictionaries) to JSONL
+        save_enriched_data(successful_enrichments, output_file)
+
+        print(
+            f"[bold green]Enrichment process completed. Results saved to → {output_file}[/]"
+        )
+        return output_file  # Return path for chaining
 
     except FileNotFoundError:
-        # Already handled by typer's exists=True, but good practice
-        print(f"[red]Cache file not found: {cache_file}")
+        # Should be caught by _load_repo_data_from_cache or typer
+        print(f"[red]Input cache file not found: {cache_file}")
         raise typer.Exit(code=1)
-    except RuntimeError as e:  # Catch config errors
-        print(f"[red]Configuration Error: {e}")
+    except (
+        RuntimeError
+    ) as e:  # Catch config errors (e.g., missing API keys detected by LiteLLM)
+        print(f"[red]Runtime Error during enrichment: {e}")
+        print(
+            "[yellow]Hint: Ensure necessary API keys (e.g., OPENROUTER_API_KEY) are set in your environment.[/yellow]"
+        )
         raise typer.Exit(code=1)
     except Exception as e:
         print(f"[red]An unexpected error occurred during enrichment: {e}")
-        import traceback
-
         traceback.print_exc()
         raise typer.Exit(code=1)
 
@@ -488,101 +426,140 @@ def full_pipeline(
         "--max-issue-age-days",
         help="Filter search: issues must be created within N days.",
     ),
-    max_linked_prs: Optional[int] = typer.Option(
+    max_linked_prs: Optional[int] = typer.Option(  # Add the parameter definition here
         None,
         "--max-linked-prs",
-        help="Filter search: issues must have at most N linked PRs.",
+        help="[Search Phase] Filter search: issues must have at most N linked PRs.",
     ),
-    output_formats: List[str] = typer.Option(
-        ["md", "jsonl"], "--format", "-f", help="Output format(s): md, jsonl, csv."
-    ),
+    # Remove output_formats, enrichment output is always JSONL now
+    # output_formats: List[str] = typer.Option(
+    #     ["md", "jsonl"], "--format", "-f", help="Output format(s): md, jsonl, csv."
+    # ),
     output_dir: Path = typer.Option(
-        OUTPUT_DIR, "--output-dir", "-o", help="Directory for summary files."
+        OUTPUT_DIR,
+        "--output-dir",
+        "-o",
+        help="[Enrich Phase] Directory for the final enriched JSONL file.",
     ),
-    concurrency: int = typer.Option(  # Add typer.Option call here
-        CONCURRENCY, "--concurrency", "-w", help="Parallel workers for enrichment."
+    concurrency: int = typer.Option(
+        CONCURRENCY,
+        "--concurrency",
+        "-w",
+        help="[Enrich Phase] Parallel workers for issue scraping/analysis.",
     ),
-    # Add the browser checker flag here too
     use_browser_checker: bool = typer.Option(
         False,
         "--use-browser-checker",
-        help="Use Playwright browser automation for issue label checks during the search phase.",
+        help="[Search Phase] Use Playwright browser automation for issue label checks.",
+        is_flag=True,
+    ),
+    keep_cache: bool = typer.Option(
+        False,
+        "--keep-cache",
+        help="Keep the intermediate raw repository cache file generated by the search step.",
         is_flag=True,
     ),
 ) -> None:
     """
-    Convenience command to run the search and enrich steps sequentially.
+    Run the full pipeline: search -> enrich (issue analysis).
 
-    Uses a temporary JSON Lines file to pass data between search and enrich.
+    Finds repositories, then scrapes and analyzes their issues using Playwright/LLM.
+    Uses a temporary file for the intermediate search results unless --keep-cache is specified.
+    Outputs a final JSON Lines file with enriched data including issue analysis.
     """
     print("[bold blue]Starting full pipeline (search -> enrich)...[/]")
 
-    temp_cache_path = None  # Initialize
+    temp_cache_path = None
+    final_output_path = None
     try:
-        # Use a temporary file for the cache between steps, ensuring .jsonl suffix
-        # Create in the default cache dir for better organization
-        cache_dir = Path(CACHE_DIR)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            delete=False,
-            suffix=".jsonl",
-            prefix="repobird_cache_",
-            dir=cache_dir,
-        ) as tmp_file:
-            temp_cache_path = Path(tmp_file.name)
-
-        print(f"Using temporary cache file: {temp_cache_path}")
+        # --- Determine Cache Path ---
+        if keep_cache:
+            # Generate a non-temporary cache filename based on search params
+            cache_dir = Path(CACHE_DIR)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            safe_label = "".join(c if c.isalnum() else "_" for c in label)
+            safe_lang = "".join(c if c.isalnum() else "_" for c in language)
+            filename_parts = [
+                "raw_repos",
+                f"label_{safe_label}",
+                f"lang_{safe_lang}",
+                f"stars_{min_stars}",
+                f"days_{recent_days}",
+            ]
+            if max_issue_age_days is not None:
+                filename_parts.append(f"age_{max_issue_age_days}")
+            if max_linked_prs is not None:
+                filename_parts.append(f"prs_{max_linked_prs}")
+            cache_filename = "_".join(filename_parts) + ".jsonl"
+            search_cache_path = cache_dir / cache_filename
+            print(f"Using persistent cache file: {search_cache_path}")
+        else:
+            # Use a temporary file for the cache between steps
+            cache_dir = Path(CACHE_DIR)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            # Create the temp file manually to get its path object
+            fd, temp_path_str = tempfile.mkstemp(
+                suffix=".jsonl", prefix="repobird_cache_", dir=cache_dir
+            )
+            os.close(fd)  # Close the file descriptor, we just needed the name
+            temp_cache_path = Path(temp_path_str)  # Store the path for later cleanup
+            search_cache_path = temp_cache_path
+            print(f"Using temporary cache file: {search_cache_path}")
 
         # --- Search Step ---
-        # Call the search command function programmatically
-        # It now returns the path on success, or None on failure/no results
         actual_cache_path = search(
             label=label,
             language=language,
             max_results=max_results,
             min_stars=min_stars,
             recent_days=recent_days,
-            max_issue_age_days=max_issue_age_days,  # Pass new arg
-            max_linked_prs=max_linked_prs,  # Pass new arg
-            cache_file=temp_cache_path,  # Pass the temp path
-            use_browser_checker=use_browser_checker,  # Pass the flag
+            max_issue_age_days=max_issue_age_days,
+            max_linked_prs=max_linked_prs,
+            cache_file=search_cache_path,  # Use the determined path
+            use_browser_checker=use_browser_checker,
         )
 
         # Check if search succeeded and found results
         if actual_cache_path is None:
-            # Search already printed messages about failure or no results
             print(
                 "[yellow]Search step did not yield usable results. Skipping enrichment."
             )
-            raise typer.Exit()  # Exit cleanly
-        # Double check the file exists and is not empty before proceeding
+            # No need to raise Exit here, just return, finally will clean up temp file
+            return
         elif not actual_cache_path.exists() or actual_cache_path.stat().st_size == 0:
             print(
                 "[yellow]Search completed but cache file is missing or empty. Skipping enrichment."
             )
-            raise typer.Exit()  # Exit cleanly
+            # No need to raise Exit here, just return, finally will clean up temp file
+            return
 
         # --- Enrich Step ---
-        # Call the enrich command function programmatically using the actual cache path
-        enrich(
-            cache_file=actual_cache_path,  # Use the path returned by search
-            output_formats=output_formats,
+        # Call the enrich command function programmatically
+        # It now returns the path to the final enriched output file
+        final_output_path = enrich(
+            cache_file=actual_cache_path,  # Use the path from search step
             output_dir=output_dir,
             concurrency=concurrency,
         )
 
-        print("[bold green]Full pipeline completed successfully.[/]")
+        if final_output_path:
+            print(
+                f"[bold green]Full pipeline completed successfully. Final output → {final_output_path}[/]"
+            )
+        else:
+            print(
+                "[yellow]Full pipeline finished, but enrichment step did not produce an output file.[/]"
+            )
 
     except typer.Exit:
-        # Propagate exit signals cleanly
+        # Propagate exit signals cleanly if raised by search() or enrich()
         raise
     except Exception as e:
         print(f"[bold red]An error occurred during the full pipeline: {e}[/]")
         traceback.print_exc()
         raise typer.Exit(code=1)
     finally:
-        # Clean up the temporary file if it was created and still exists
+        # Clean up the temporary cache file if it was created and still exists
         if temp_cache_path and temp_cache_path.exists():
             try:
                 temp_cache_path.unlink()

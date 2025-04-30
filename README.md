@@ -1,10 +1,14 @@
-# find-github-prospects
+# RepoBird LeadGen: GitHub Repo & Issue Analysis Tool
 
-This repository contains the `repobird-leadgen` tool, a Python CLI application designed to automate the discovery of relevant GitHub repositories and extraction of potential contact information.
+This repository contains the `repobird-leadgen` tool, a Python CLI application designed to:
+1.  Discover relevant GitHub repositories based on search criteria.
+2.  Identify specific open issues within those repositories.
+3.  Scrape the content of those issues (title, body, comments).
+4.  Analyze the scraped issue content using an LLM (via LiteLLM) to assess complexity, suitability for AI agents, and other factors.
 
 ## RepoBird LeadGen Tool
 
-`repobird-leadgen` helps find GitHub repositories based on specified criteria (like issue labels, language, stars, and activity) and gathers details including potential contact points.
+`repobird-leadgen` helps find GitHub repositories matching criteria (issue labels, language, stars, activity), identifies relevant issues, scrapes their content, performs LLM-based analysis, and saves the structured results.
 
 ### Installation
 
@@ -13,19 +17,20 @@ This repository contains the `repobird-leadgen` tool, a Python CLI application d
     uv venv
     source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
     ```
-2.  Install the tool and its dependencies:
+2.  Install the tool and its dependencies (including development tools):
     ```bash
-    uv pip install -r pyproject.toml --extra dev
+    uv pip install -e .[dev]
     ```
-3.  **Install Playwright Browsers:** The optional browser-based checker requires browser binaries. Install them using:
+    *Note: Using `-e .[dev]` installs the package in editable mode along with development dependencies (like `pytest`, `pytest-mock`, `ruff`, `pydantic`) specified in `pyproject.toml`.*
+3.  **Install Playwright Browsers:** The issue scraping functionality relies on Playwright. Install the necessary browser binaries:
     ```bash
-    playwright install
+    playwright install --with-deps
     ```
-    *Note: If this command fails due to missing operating system dependencies, you might need to install them manually or try `playwright install --with-deps` (which may require `sudo` and might not work on all Linux distributions).*
+    *Note: `--with-deps` attempts to install needed OS dependencies. This might require `sudo` and may not work on all systems. If it fails, you might need to install browser dependencies manually based on Playwright documentation for your OS.*
 
 ### Configuration
 
-`repobird-leadgen` requires a GitHub Personal Access Token (PAT) to interact with the GitHub API.
+`repobird-leadgen` requires API keys for GitHub and the LLM provider (via LiteLLM).
 
 1.  Copy the example environment file:
     ```bash
@@ -34,13 +39,21 @@ This repository contains the `repobird-leadgen` tool, a Python CLI application d
 2.  Edit the newly created `.env` file and add your GitHub PAT:
     ```dotenv
     # .env
-    GITHUB_TOKEN=your_github_pat_here
+    # .env
+    GITHUB_TOKEN="your_github_pat_here"
+
+    # LiteLLM Configuration (Example for OpenRouter)
+    OPENROUTER_API_KEY="your_openrouter_api_key_here"
+    # Optional: Specify the LLM model if you don't want the default
+    # LLM_MODEL="openrouter/google/gemini-pro-1.5"
     ```
+    *See the [LiteLLM documentation](https://docs.litellm.ai/docs/providers) for environment variables required by other providers (OpenAI, Anthropic, Azure, etc.).*
 
 You can also optionally configure the following settings in the `.env` file:
-*   `CONCURRENCY=20` (Number of parallel workers for enrichment, default: 20)
-*   `CACHE_DIR=cache` (Directory to store raw search results, default: "cache")
-*   `OUTPUT_DIR=output` (Directory to save enriched summary files, default: "output")
+*   `CONCURRENCY=20` (Number of parallel workers for issue scraping/analysis, default: 20)
+*   `CACHE_DIR=cache` (Directory to store raw search results cache, default: "cache")
+*   `OUTPUT_DIR=output` (Directory to save final enriched analysis files, default: "output")
+*   `LLM_MODEL="openrouter/google/gemini-flash-1.5"` (Default LLM model used for analysis)
 
 ### Usage
 
@@ -64,31 +77,34 @@ Finds repositories matching your criteria and saves the raw data to a JSON cache
     *   `--recent-days` / `-d` INTEGER: Maximum number of days since the last push activity (default: 365).
     *   `--cache-file` / `-c` PATH: Path to save the output JSON Lines cache file. If not specified, a filename is generated based on the search parameters (label, language, stars, days) in the `cache/` directory (e.g., `cache/raw_repos_label_good_first_issue_lang_python_stars_20_days_365.jsonl`). If the file already exists, new results are appended, skipping duplicates.
     *   `--max-issue-age-days` INTEGER: Only find repos where at least one matching issue was created within this many days (optional).
-    *   `--max-linked-prs` INTEGER: Only find repos where at least one matching issue has this many or fewer linked pull requests (optional).
-    *   `--use-browser-checker`: Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.
-*   **Example with detailed filters:** Find Python repos with "help wanted" issues created in the last 30 days that have 0 linked PRs:
+    *   `--max-linked-prs` INTEGER: [Search Phase] Only find repos where at least one matching issue has this many or fewer linked pull requests (optional).
+    *   `--use-browser-checker`: [Search Phase] Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.
+*   **Example with detailed filters:** Find Python repos with "good first issue" issues created in the last 30 days that have 0 linked PRs, saving to a specific cache file:
     ```bash
-    repobird-leadgen search --label "good first issue" --language python --max-issue-age-days 30 --max-linked-prs 0
+    repobird-leadgen search --label "good first issue" --language python --max-issue-age-days 30 --max-linked-prs 0 --cache-file cache/my_search_results.jsonl
     ```
 
 **2. `enrich`**
 
-Reads a cache file generated by the `search` command, fetches additional details (like contact info and repo stats), and saves summarized information in specified formats.
+Reads a cache file generated by the `search` command, scrapes the content (title, body, comments) of each identified issue using Playwright, analyzes the content using an LLM (via LiteLLM), and saves the structured analysis results along with the original repository data to a new JSON Lines file.
 
 *   **Usage:**
     ```bash
     repobird-leadgen enrich <CACHE_FILE> [OPTIONS]
     ```
 *   **Argument:**
-    *   `CACHE_FILE`: Path to the JSON Lines (`.jsonl`) cache file created by the `search` command.
+    *   `CACHE_FILE`: Path to the JSON Lines (`.jsonl`) cache file created by the `search` command (contains repo info including `found_issues`).
 *   **Options:**
-    *   `--format` / `-f` [md|jsonl|csv]: Output format(s) for the summaries (default: md, jsonl). Can be specified multiple times.
-    *   `--output-dir` / `-o` PATH: Directory to save the summary files (default: "output").
-    *   `--concurrency` / `-w` INTEGER: Number of parallel workers for fetching details (default: 20).
+    *   `--output-dir` / `-o` PATH: Directory to save the final enriched JSON Lines file (default: "output"). The output filename will be based on the input cache file name (e.g., `enriched_my_search_results.jsonl`).
+    *   `--concurrency` / `-w` INTEGER: Number of parallel workers for scraping and analyzing issues (default: 20).
+*   **Example:** Enrich the results from the previous search example:
+    ```bash
+    repobird-leadgen enrich cache/my_search_results.jsonl --output-dir output/analysis --concurrency 10
+    ```
 
 **3. `full`**
 
-Runs the `search` and `enrich` steps sequentially using a temporary cache file.
+Runs the `search` and `enrich` steps sequentially. It uses a temporary cache file between the steps unless `--keep-cache` is specified. Outputs the final enriched JSON Lines file.
 
 *   **Usage:**
     ```bash
@@ -99,8 +115,14 @@ Runs the `search` and `enrich` steps sequentially using a temporary cache file.
     *   `--language` / `-lang` TEXT (default: "python")
     *   `--max-results` / `-n` INTEGER (default: 30)
     *   `--min-stars` / `-s` INTEGER (default: 20)
-    *   `--recent-days` / `-d` INTEGER (default: 365)
-    *   `--use-browser-checker`: Use browser automation for issue checks during the search phase.
-    *   `--format` / `-f` [md|jsonl|csv] (default: md, jsonl)
-    *   `--output-dir` / `-o` PATH (default: "output")
-    *   `--concurrency` / `-w` INTEGER (default: 20)
+    *   `--recent-days` / `-d` INTEGER (default: 365) [Search Phase]
+    *   `--max-issue-age-days` INTEGER (optional) [Search Phase]
+    *   `--max-linked-prs` INTEGER (optional) [Search Phase]
+    *   `--use-browser-checker`: [Search Phase] Use browser automation for issue checks.
+    *   `--output-dir` / `-o` PATH (default: "output") [Enrich Phase] Directory for final enriched JSONL file.
+    *   `--concurrency` / `-w` INTEGER (default: 20) [Enrich Phase] Parallel workers for scraping/analysis.
+    *   `--keep-cache`: Keep the intermediate raw repository cache file from the search step.
+*   **Example:** Run the full pipeline for Python repos with "help wanted" issues, keeping the intermediate cache:
+    ```bash
+    repobird-leadgen full --label "help wanted" --language python --min-stars 50 --keep-cache --output-dir output/full_run_analysis
+    ```

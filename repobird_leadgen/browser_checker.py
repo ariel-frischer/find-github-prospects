@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Optional, Tuple, List, Dict, Any  # Added Dict, Any
 import urllib.parse
+from typing import Any, Dict, List, Optional, Tuple  # Added Dict, Any
 
+from playwright.sync_api import (
+    Error as PlaywrightError,
+)
 from playwright.sync_api import (
     Page,
     Playwright,
     sync_playwright,
+)
+from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
-    Error as PlaywrightError,
 )
 from rich import print
 
@@ -22,19 +26,19 @@ class BrowserIssueChecker:
     _ISSUE_FILTER_INPUT_SELECTOR = (
         "input#repository-input"  # Updated selector based on inspection
     )
-    # Selector for individual issue rows (based on provided HTML)
-    _ISSUE_ROW_SELECTOR = "div.IssueRow-module__row--XmR1f"
-    # Selector for the link containing the issue title and number within a row
-    _ISSUE_LINK_SELECTOR = "a.IssuePullRequestTitle-module__ListItemTitle_1--_xOfg"
-    # Selector for the 'no results' message container
+    # Use data-testid for issue rows
+    _ISSUE_ROW_SELECTOR = "div[data-testid='issue-row']"
+    # Use data-testid for the issue link/title within a row
+    _ISSUE_LINK_SELECTOR = "a[data-testid='issue-title-link']"
+    # Selector for the 'no results' message container (seems stable enough)
     _NO_RESULTS_SELECTOR = "div.blankslate"
     # Regex to extract issue number from the href of the issue link
     # Regex to extract issue number from the href of the issue link
     # Regex to extract issue number from the href of the issue link
     _ISSUE_ID_RE = re.compile(r"/issues/(\d+)$")
     # Selectors for individual issue page details
-    # Target the H1 using its data-component attribute
-    _ISSUE_TITLE_SELECTOR = 'h1[data-component="PH_Title"]'
+    # Target the BDI element containing the title text using its data-testid
+    _ISSUE_TITLE_SELECTOR = 'bdi[data-testid="issue-title"]'
     _ISSUE_BODY_SELECTOR = 'div.markdown-body[data-testid="markdown-body"]'
 
     # Increase default timeout significantly for debugging
@@ -103,9 +107,10 @@ class BrowserIssueChecker:
             # Wait for container elements to be attached, give full timeout
             # Use simpler container selectors for waiting
             title_container_selector = 'div[data-component="TitleArea"]'
-            body_container_selector = "div.IssueBodyViewer-module__IssueBody--MXyFt"
+            # Use data-testid for the body container
+            body_container_selector = 'div[data-testid="issue-body"]'
 
-            # print(f"      Waiting for title container: '{title_container_selector}'...") # Commented out
+            # print(f"      Waiting for title container: '{title_container_selector}'...")
             page.wait_for_selector(
                 title_container_selector, state="attached", timeout=self.timeout
             )
@@ -117,13 +122,12 @@ class BrowserIssueChecker:
             )
             # print("      Body container found.") # Commented out
 
-            # Explicitly wait for the title element to be VISIBLE
-            # Updated print statement to reflect the new selector target (H1 with data-component)
-            # print(f"      Waiting for title element H1 to be visible: '{self._ISSUE_TITLE_SELECTOR}'...") # Commented out
+            # Explicitly wait for the title element (BDI) to be VISIBLE
+            # print(f"      Waiting for title element BDI to be visible: '{self._ISSUE_TITLE_SELECTOR}'...")
             page.wait_for_selector(
                 self._ISSUE_TITLE_SELECTOR, state="visible", timeout=self.timeout
             )
-            # print("      Title element H1 is visible.") # Commented out
+            # print("      Title element BDI is visible.")
             title_element = page.locator(self._ISSUE_TITLE_SELECTOR).first
 
             # Explicitly wait for the body element to be VISIBLE

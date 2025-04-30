@@ -28,10 +28,9 @@ run:
 	@echo "Running example search (API, last 10 days, min 200 stars)..."
 	@$(VENV_RUN) repobird-leadgen search --label "good first issue" --language python --max-results 10 --recent-days 10 --min-stars 200
 
-# Run an example search command using the browser checker
-run-browser: install-browsers
+run-browser:
 	@echo "Running example search (Browser, label 'good first issue', lang python, max 10 results, recent 10 days, min 100 stars, max issue age 30 days, max 0 linked PRs)..."
-	@$(VENV_RUN) repobird-leadgen search --label "good first issue" --language python --max-results 100 --recent-days 30 --min-stars 100 --max-issue-age-days 30 --max-linked-prs 0 --use-browser-checker
+	@$(VENV_RUN) repobird-leadgen search --label "good first issue" --language python --max-results 100 --recent-days 60 --min-stars 100 --max-issue-age-days 60 --max-linked-prs 0 --use-browser-checker
 
 # Update a specific cache file with missing issue numbers (requires label)
 # Example: make update-cache CACHE_FILE=cache/raw_repos_label_good_first_issue_lang_python_stars_200_days_10.jsonl LABEL="good first issue"
@@ -52,6 +51,17 @@ aider:
 aider-test:
 	@aider --no-auto-commit --lint-cmd scripts/lint.sh --auto-lint --test-cmd 'make test' --auto-test
 
+# Run the enrichment process on a specific cache file
+# Usage: make enrich FILE=cache/your_file.jsonl [ARGS="--concurrency 5"]
+enrich:
+	@echo "Running enrichment command on file: $(FILE)"
+	@if [ -z "$(FILE)" ]; then \
+		echo "[Error] FILE argument must be set. Example:"; \
+		echo "make enrich FILE=path/to/your.jsonl"; \
+		exit 1; \
+	fi
+	$(VENV_RUN) repobird-leadgen enrich "$(FILE)" $(ARGS)
+
 # Interactively review issues in a cache file
 # Usage:
 #   make review                 # CLI will prompt for file selection from cache/
@@ -62,4 +72,4 @@ review:
 	@echo "Running review command..."
 	$(VENV_RUN) repobird-leadgen review $(ARGS)
 
-.PHONY: install-dev fix test install-browsers run run-browser update-cache aider aider-test review
+.PHONY: install-dev fix test install-browsers run run-browser update-cache aider aider-test enrich review

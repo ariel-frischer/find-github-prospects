@@ -11,7 +11,9 @@ dependencies = [
     "requests==2.32.0",
     "tqdm==4.66.2",
     "rich==13.7.1",
-    "playwright==1.44.0", # Added for browser automation
+    "playwright==1.44.0",
+    "litellm>=1.67.5",
+    "pydantic>=2.11.4",
 ]
 
 [project.scripts]
@@ -20,7 +22,7 @@ repobird-leadgen = "repobird_leadgen.cli:app"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.5",
-    "pytest-mock", # Added for mocker fixture
+    "pytest-mock",
     "ruff",
 ]
 
