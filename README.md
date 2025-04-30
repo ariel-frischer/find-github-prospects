@@ -126,3 +126,14 @@ Runs the `search` and `enrich` steps sequentially. It uses a temporary cache fil
     ```bash
     repobird-leadgen full --label "help wanted" --language python --min-stars 50 --keep-cache --output-dir output/full_run_analysis
     ```
+
+## Roadmap / Future Enhancements
+
+*   **URL Content Extraction & Summarization:**
+    *   Identify URLs mentioned within issue bodies and comments.
+    *   For relevant URLs (e.g., documentation, related code snippets, external discussions), scrape their content.
+    *   Generate concise summaries of the scraped URL content.
+    *   Incorporate these summaries into the prompt sent to the LLM during the `enrich` phase to provide richer context for the `IssueAnalysis`. This could improve the accuracy of complexity scores and suitability assessments.
+*   **Advanced Comment Scraping:** Implement logic to handle pagination or dynamic loading of comments on GitHub issue pages to capture the full discussion context for very long threads.
+*   **Configurable LLM Prompts:** Allow users to customize the system prompt used for issue analysis via configuration files.
+*   **Alternative Output Formats:** Reintroduce support for different output formats (e.g., CSV, Markdown table) for the final enriched data, potentially using libraries like `pandas` for easier conversion.
