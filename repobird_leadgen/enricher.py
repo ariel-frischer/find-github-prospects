@@ -1,27 +1,37 @@
 import json
+import logging  # Added
 import os
 import traceback
-from dataclasses import (  # Keep asdict for EnrichedRepoData if needed elsewhere
+from dataclasses import (
     dataclass,
     field,
 )
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional  # Ensured present
 
 import litellm
 from playwright.sync_api import Page, Playwright, sync_playwright
 from pydantic import ValidationError
-from rich import print
 
+# Removed URLExtract and Goose imports as they are now in url_processor
+# from urlextract import URLExtract
+# from goose3 import Goose
 # Import the Pydantic models from models.py
 from .models import IssueAnalysis, LLMIssueAnalysisSchema
 
+# Import the new URL processing function
+from .url_processor import process_urls_for_issue
+
 # --- Configuration ---
 # Ensure OPENROUTER_API_KEY is set in your environment for LiteLLM
-# LLM_MODEL = os.getenv("LLM_MODEL", "openrouter/google/gemini-2.5-pro-preview-03-25")
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-2.5-pro-preview-03-25")
+# LLM_MODEL = os.getenv("LLM_MODEL", "openrouter/google/gemini-1.5-pro-preview-0409")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-1.5-pro-preview-0409")
 MAX_COMMENTS_FOR_LLM = 100  # Limit number of comments sent to LLM
 PLAYWRIGHT_TIMEOUT = 30000  # 30 seconds for page operations
 
+# Setup basic logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # --- Data Structures ---
 # IssueAnalysis is now imported from models.py
@@ -56,16 +66,16 @@ class Enricher:
         try:
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(headless=self.headless)
-            print("[italic grey50]Playwright browser started.[/italic grey50]")
+            logging.info("Playwright browser started.")
         except Exception as e:
-            print(f"[red]Error starting Playwright: {e}")
+            logging.error(f"Error starting Playwright: {e}")
             self._cleanup()  # Ensure cleanup if launch fails
             raise  # Re-raise the exception
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._cleanup()
-        print("[italic grey50]Playwright browser stopped.[/italic grey50]")
+        logging.info("Playwright browser stopped.")
 
     def _cleanup(self):
         """Safely closes browser and stops Playwright."""
@@ -74,13 +84,13 @@ class Enricher:
                 self.browser.close()
                 self.browser = None
             except Exception as e:
-                print(f"[yellow]Warning: Error closing Playwright browser: {e}")
+                logging.warning(f"Warning: Error closing Playwright browser: {e}")
         if self.playwright:
             try:
                 self.playwright.stop()
                 self.playwright = None
             except Exception as e:
-                print(f"[yellow]Warning: Error stopping Playwright: {e}")
+                logging.warning(f"Warning: Error stopping Playwright: {e}")
 
     def _get_new_page(self) -> Page:
         """Creates a new browser page."""
@@ -97,9 +107,9 @@ class Enricher:
         page = None
         try:
             page = self._get_new_page()
-            print(f"  Scraping: {issue_url} ...")
+            logging.info(f"  Scraping: {issue_url} ...")
             page.goto(issue_url, wait_until="domcontentloaded", timeout=self.timeout)
-            print("    Page loaded. Waiting for container elements...")
+            logging.info("    Page loaded. Waiting for container elements...")
 
             # Define selectors based on browser_checker.py and stable attributes
             title_container_selector = 'div[data-component="TitleArea"]'
@@ -120,28 +130,34 @@ class Enricher:
             comment_body_selector = 'div[data-testid="markdown-body"]'
 
             # 1. Wait for container elements to be attached (ensures structure exists)
-            print(f"    Waiting for title container: '{title_container_selector}'")
+            logging.info(
+                f"    Waiting for title container: '{title_container_selector}'"
+            )
             page.wait_for_selector(
                 title_container_selector, state="attached", timeout=self.timeout
             )
-            print(f"    Waiting for body container: '{body_container_selector}'")
+            logging.info(f"    Waiting for body container: '{body_container_selector}'")
             # Wait for the *first* comment container, which usually holds the body
             page.locator(body_container_selector).first.wait_for(
                 state="attached", timeout=self.timeout
             )
-            print("    Container elements attached.")
+            logging.info("    Container elements attached.")
 
             # 2. Wait for specific title and body elements to be visible
-            print(f"    Waiting for title element to be visible: '{title_selector}'")
+            logging.info(
+                f"    Waiting for title element to be visible: '{title_selector}'"
+            )
             page.wait_for_selector(
                 title_selector, state="visible", timeout=self.timeout
             )
             title_elem = page.locator(title_selector).first
             title = title_elem.text_content(timeout=self.timeout / 2) or ""
             title = title.strip()
-            print(f"    Title found: '{title[:50]}...'")
+            logging.info(f"    Title found: '{title[:50]}...'")
 
-            print(f"    Waiting for body element to be visible: '{body_selector}'")
+            logging.info(
+                f"    Waiting for body element to be visible: '{body_selector}'"
+            )
             # Target the body within the *first* comment container
             body_elem = (
                 page.locator(body_container_selector).first.locator(body_selector).first
@@ -149,43 +165,30 @@ class Enricher:
             body_elem.wait_for(state="visible", timeout=self.timeout)
             body = body_elem.text_content(timeout=self.timeout / 2) or ""
             body = body.strip()
-            print(f"    Body found: '{body[:50]}...'")
+            logging.info(f"    Body found: '{body[:50]}...'")
 
             # 3. Get comments (using updated selectors and logic)
-            print(f"    Locating comment containers: '{comment_container_selector}'")
+            logging.info(
+                f"    Locating comment containers: '{comment_container_selector}'"
+            )
             comments = []
             # Locate all timeline elements
             timeline_elements = page.locator(comment_container_selector)
             timeline_count = timeline_elements.count()
-            print(f"    Found {timeline_count} potential timeline elements.")
+            logging.info(f"    Found {timeline_count} potential timeline elements.")
 
-            # Identify the main issue body element to skip it during comment iteration
-            main_body_element = page.locator(body_container_selector).first
+            # REMOVED: Unused variable assignment for main_body_element
+            # main_body_element = page.locator(body_container_selector).first
 
             for i in range(timeline_count):
                 timeline_element = timeline_elements.nth(i)
 
                 # Check if this timeline element contains the main issue body
-                # We can do this by checking if the main body element is an ancestor
-                # or if the timeline element itself contains the specific body selector
-                # A simpler check might be to see if it contains our specific body_selector
-                # and if that element matches the one we already found.
                 potential_body_in_timeline = timeline_element.locator(
                     body_selector
                 ).first
                 is_main_body = False
                 if potential_body_in_timeline.count() > 0:
-                    # Check if this potential body element is the same as the main one we found earlier
-                    # This requires comparing the elements directly, which can be tricky.
-                    # A simpler heuristic: assume the *first* timeline element containing
-                    # the body_selector is the main issue body.
-                    # Let's refine: Check if the timeline element *contains* the main_body_element we located.
-                    # Playwright doesn't have a direct 'contains' for elements.
-                    # Alternative: Check if the timeline element's outer HTML contains the main body's outer HTML (less reliable).
-                    # Let's stick to the assumption: the first timeline element containing a 'markdown-body' is the main issue.
-                    # We already have the main body text. Let's find the body within this timeline element
-                    # and compare its text content.
-
                     current_body_elem = timeline_element.locator(
                         comment_body_selector
                     ).first
@@ -194,14 +197,11 @@ class Enricher:
                             current_body_elem.text_content(timeout=self.timeout / 4)
                             or ""
                         )
-                        # Compare stripped text content - might be fragile if body is empty/identical to a comment
                         if (
                             current_body_text.strip() == body
                         ):  # Compare with the main body text we scraped
-                            # More robust check might be needed if bodies can be identical
-                            # For now, assume the first match is the main body
                             if not comments:  # If we haven't added any comments yet, this is likely the main body
-                                print(
+                                logging.info(
                                     f"    Skipping timeline element {i} (identified as main issue body)."
                                 )
                                 is_main_body = True
@@ -218,62 +218,79 @@ class Enricher:
                         )
                         text = text.strip()
                         if text:
-                            print(
+                            logging.info(
                                 f"    Found comment in timeline element {i}: '{text[:50]}...'"
                             )
                             comments.append(text)
-                        # else: # Optional: log if a comment body was found but empty
-                        #    print(f"    Timeline element {i} has an empty comment body.")
-                    # else: # Optional: log if a timeline element didn't contain a comment body
-                    #    print(f"    Timeline element {i} did not contain a comment body selector '{comment_body_selector}'.")
 
-            print(
+            logging.info(
                 f"    Scraped: Title='{title[:50]}...', Body='{body[:50]}...', Comments={len(comments)}"
             )
             return ScrapedIssueData(title=title, body=body, comments=comments)
 
         except Exception as e:
             error_msg = f"Error scraping {issue_url}: {e}\n{traceback.format_exc()}"
-            print(f"    [yellow]Warning: {error_msg}[/yellow]")
+            logging.warning(f"    Warning: {error_msg}")
             return ScrapedIssueData(error=error_msg)
         finally:
             if page:
                 try:
                     page.close()
                 except Exception as e:
-                    print(f"[yellow]Warning: Error closing page for {issue_url}: {e}")
+                    logging.warning(f"Warning: Error closing page for {issue_url}: {e}")
 
-    def _build_prompt(self, issue_data: ScrapedIssueData) -> str:
-        """Builds the prompt for the LLM analysis."""
-        if not issue_data.title:
+    def _build_prompt(
+        self,
+        title: str,
+        body: str,
+        comments: List[str],
+        url_summaries: List[Dict[str, str]],
+    ) -> str:
+        """Builds the prompt for the LLM analysis, including URL summaries."""
+        if not title:
             return ""  # Cannot analyze without a title
 
         # Limit comments sent to LLM
-        comments_str = " || ".join(issue_data.comments[:MAX_COMMENTS_FOR_LLM])
-        if len(issue_data.comments) > MAX_COMMENTS_FOR_LLM:
-            comments_str += f" || ... (truncated, {len(issue_data.comments) - MAX_COMMENTS_FOR_LLM} more comments)"
+        comments_str = " || ".join(comments[:MAX_COMMENTS_FOR_LLM])
+        if len(comments) > MAX_COMMENTS_FOR_LLM:
+            comments_str += f" || ... (truncated, {len(comments) - MAX_COMMENTS_FOR_LLM} more comments)"
+
+        # Format URL Summaries
+        url_summaries_text = "**Summaries of Linked URLs:**\n"
+        if url_summaries:
+            for item in url_summaries:
+                url_summaries_text += (
+                    f"- URL: {item['url']}\n  Summary: {item['summary']}\n"
+                )
+        else:
+            url_summaries_text += "No relevant external content was found or summarized from linked URLs.\n"
+        url_summaries_text += "\n---\n"  # Separator
 
         # Generate the schema with updated descriptions
         schema_json = json.dumps(LLMIssueAnalysisSchema.model_json_schema(), indent=2)
 
         prompt = f"""
-Analyze the following GitHub issue content (title, body, comments) to determine its suitability as a task potentially solvable by an autonomous AI software agent. Focus on understanding the core problem, its complexity, and requirements.
+Analyze the following GitHub issue content (title, body, comments) and summaries of linked URLs to determine its suitability as a task potentially solvable by an autonomous AI software agent. Focus on understanding the core problem, its complexity, and requirements.
 
 **Input Issue Content:**
 
-*   **Title:** {issue_data.title}
+*   **Title:** {title}
 *   **Body:**
     ```
-    {issue_data.body}
+    {body}
     ```
 *   **Comments (selected):**
     ```
     {comments_str}
     ```
 
+---
+
+{url_summaries_text} # Added URL Summaries Section
+
 **Instructions:**
 
-Your task is to analyze the provided GitHub issue content (title, body, comments).
+Your task is to analyze the provided GitHub issue content (title, body, comments) AND the summaries of linked URLs.
 Based on your analysis, generate **ONLY** a valid JSON object that strictly conforms to the following JSON schema.
 **DO NOT** include any text, explanations, apologies, summaries, or markdown formatting before or after the JSON object. Your entire response must be the JSON object itself.
 
@@ -287,19 +304,23 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
 """
         return prompt
 
-    def _analyze_issue_with_llm(self, issue_data: ScrapedIssueData) -> Dict[str, Any]:
+    def _analyze_issue_with_llm(
+        self, scraped_data: ScrapedIssueData, url_summaries: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
         """
-        Analyzes the scraped issue data using LiteLLM, expecting a JSON object
+        Analyzes the scraped issue data and URL summaries using LiteLLM, expecting a JSON object
         that conforms to the LLMIssueAnalysisSchema Pydantic model.
 
         Returns:
             A dictionary containing the validated analysis data or an 'error' key.
         """
-        prompt = self._build_prompt(issue_data)
+        prompt = self._build_prompt(
+            scraped_data.title, scraped_data.body, scraped_data.comments, url_summaries
+        )
         if not prompt:
             return {"error": "Cannot analyze issue without a title."}
 
-        print(f"    Analyzing with LLM ({LLM_MODEL})...")
+        logging.info(f"    Analyzing with LLM ({LLM_MODEL})...")
         analysis_result: Optional[LLMIssueAnalysisSchema] = None
         error_message: Optional[str] = None
         raw_llm_output: Optional[str] = None
@@ -308,28 +329,18 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
             response = litellm.completion(
                 model=LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                # max_tokens=512,  # Adjust if needed based on schema complexity
-                # temperature=0.1,  # Lower temperature for more deterministic JSON
-                # Use the Pydantic model schema for structured output
                 response_format=LLMIssueAnalysisSchema,
-                # response_format={
-                #     "type": "json_schema",
-                #     "json_schema": LLMIssueAnalysisSchema.model_json_schema(),
-                # },
-                # Consider adding 'strict=True' if the model supports it and you want stricter validation
-                # strict=True
             )
-            print(f"response={response}")
+            logging.info(f"response={response}")
             # Extract the model's JSON output string
             raw_llm_output = response.choices[0].message.content
-            print(f"raw_llm_output={raw_llm_output}")
+            logging.info(f"raw_llm_output={raw_llm_output}")
 
             # Parse the raw JSON string and validate against the Pydantic model
-            # Assuming raw_llm_output is now clean JSON
-            json_string = raw_llm_output.strip()  # Still good to strip whitespace
+            json_string = raw_llm_output.strip()
             llm_data = json.loads(json_string)
             analysis_result = LLMIssueAnalysisSchema.model_validate(llm_data)
-            print("    LLM Analysis successful and validated.")
+            logging.info("    LLM Analysis successful and validated.")
             # Return the validated data as a dictionary
             return analysis_result.model_dump()
 
@@ -345,7 +356,7 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
 
         # Handle errors
         if error_message:
-            print(f"    [red]Error: {error_message}[/red]")
+            logging.error(f"    Error: {error_message}")
             return {"error": error_message}
         else:
             # Should not happen if logic is correct, but as a fallback
@@ -368,29 +379,25 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
         analysis_results: List[IssueAnalysis] = []
 
         if not repo_html_url or not isinstance(found_issues, list) or not found_issues:
-            print(
-                f"[yellow]Skipping enrichment for {repo_name}: Missing 'html_url' or valid 'found_issues' list.[/yellow]"
+            logging.warning(
+                f"Skipping enrichment for {repo_name}: Missing 'html_url' or valid 'found_issues' list."
             )
             return analysis_results  # Return empty list
 
-        print(f"Processing issues for repo: {repo_name}")
+        logging.info(f"Processing issues for repo: {repo_name}")
         for issue_number in found_issues:
             issue_url = f"{repo_html_url}/issues/{issue_number}"
-            analysis: Optional[IssueAnalysis] = None  # Use the Pydantic model type
+            analysis: Optional[IssueAnalysis] = None
             error_str: Optional[str] = None
+            url_summaries: List[Dict[str, str]] = []  # Initialize for each issue
 
             if not isinstance(issue_number, int):
                 error_str = f"Invalid issue number format: {issue_number}"
-                print(f"  [yellow]Warning: {error_str} in {repo_name}.[/yellow]")
-                # Create a minimal IssueAnalysis object with the error
-                # Need dummy values for required fields if validation fails early
-                # Create a minimal IssueAnalysis object with the error
-                # Need dummy values for ALL required fields if validation fails early
+                logging.warning(f"  Warning: {error_str} in {repo_name}.")
                 analysis = IssueAnalysis(
                     issue_number=issue_number,
                     issue_url=issue_url,
                     error=error_str,
-                    # Provide dummy values for all required fields from LLMIssueAnalysisSchema
                     full_problem_statement="Error: Invalid issue number format.",
                     complexity_score=-1.0,
                     is_good_first_issue_for_agent=False,
@@ -403,17 +410,14 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
                 analysis_results.append(analysis)
                 continue
 
-            # 1. Scrape
+            # 1. Scrape Issue Content
             scraped_data = self.scrape_github_issue(issue_url)
             if scraped_data.error:
                 error_str = f"Scraping failed: {scraped_data.error}"
-                # Create analysis object with error, providing dummy required fields
-                # Create analysis object with error, providing dummy required fields
                 analysis = IssueAnalysis(
                     issue_number=issue_number,
                     issue_url=issue_url,
                     error=error_str,
-                    # Provide dummy values for all required fields from LLMIssueAnalysisSchema
                     full_problem_statement=f"Error: Failed to scrape issue content. Details: {error_str}",
                     complexity_score=-1.0,
                     is_good_first_issue_for_agent=False,
@@ -424,21 +428,37 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
                     meta_notes="Scraping failure prevented analysis.",
                 )
                 analysis_results.append(analysis)
-                continue  # Move to next issue
+                continue
 
-            # 2. Analyze
-            llm_result_dict = self._analyze_issue_with_llm(scraped_data)
+            # --- Start: URL Processing (Refactored) ---
+            url_summaries = []  # Initialize empty list
+            if scraped_data.title:  # Only process URLs if we have basic issue data
+                # Combine text for URL extraction
+                combined_text = (
+                    f"{scraped_data.title}\n{scraped_data.body}\n"
+                    + "\n".join(scraped_data.comments)
+                )
+                # Call the refactored URL processing function
+                url_summaries = process_urls_for_issue(
+                    combined_text=combined_text,
+                    issue_title=scraped_data.title,
+                    issue_body=scraped_data.body or "",  # Pass body or empty string
+                    issue_url_for_logging=issue_url,
+                )
+            # --- End: URL Processing ---
+
+            # 2. Analyze Issue Content (including URL Summaries)
+            llm_result_dict = self._analyze_issue_with_llm(
+                scraped_data, url_summaries
+            )  # Pass summaries
 
             # 3. Validate and Create Pydantic Object
             if llm_result_dict.get("error"):
                 error_str = f"LLM analysis failed: {llm_result_dict['error']}"
-                # Create analysis object with error, providing dummy required fields
-                # Create analysis object with error, providing dummy required fields
                 analysis = IssueAnalysis(
                     issue_number=issue_number,
                     issue_url=issue_url,
                     error=error_str,
-                    # Provide dummy values for all required fields from LLMIssueAnalysisSchema
                     full_problem_statement=f"Error: LLM analysis failed. Details: {error_str}",
                     complexity_score=-1.0,
                     is_good_first_issue_for_agent=False,
@@ -462,14 +482,11 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
                     error_str = (
                         f"Internal validation failed after LLM analysis: {val_err}"
                     )
-                    print(f"    [red]Error: {error_str}[/red]")
-                    # Create analysis object with error, providing dummy required fields
-                    # Create analysis object with error, providing dummy required fields
+                    logging.error(f"    Error: {error_str}")
                     analysis = IssueAnalysis(
                         issue_number=issue_number,
                         issue_url=issue_url,
                         error=error_str,
-                        # Provide dummy values for all required fields from LLMIssueAnalysisSchema
                         full_problem_statement=f"Error: Post-LLM validation failed. Details: {error_str}",
                         complexity_score=-1.0,
                         is_good_first_issue_for_agent=False,
@@ -483,7 +500,9 @@ Based on your analysis, generate **ONLY** a valid JSON object that strictly conf
             if analysis:  # Ensure analysis object was created
                 analysis_results.append(analysis)
 
-        print(f"Finished processing {len(found_issues)} issue(s) for {repo_name}.")
+        logging.info(
+            f"Finished processing {len(found_issues)} issue(s) for {repo_name}."
+        )
         return analysis_results
 
 
@@ -514,7 +533,9 @@ def enrich_repo_entry(repo_data: Dict[str, Any]) -> Dict[str, Any]:
             ]
     except Exception as e:
         repo_name = repo_data.get("full_name", "Unknown Repo")
-        print(f"[red]Error processing repo {repo_name} in parallel worker: {e}")
+        logging.error(
+            f"Error processing repo {repo_name} in parallel worker: {e}", exc_info=True
+        )
         # Add an error marker to the output data for this repo
         enriched_data["enrichment_error"] = str(e)
 

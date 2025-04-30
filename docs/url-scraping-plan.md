@@ -56,6 +56,77 @@ for url in urls:
 ```
 *Replace `ai_summarize` with your chosen summarization tool.*
 
+Here is how to use gooose3 with litellm to get relevance per issue with each summary: 
+
+Certainly! Here’s how you can update your workflow to use **LiteLLM** as the summarizer, ensuring summaries are relevant to the GitHub issue context.
+
+## Incorporating LiteLLM as the Summarizer
+
+**LiteLLM** is a Python SDK that provides a unified interface to 100+ large language models (LLMs), including OpenAI, Azure, Hugging Face, and local models. It can be used to generate summaries by calling its `completion` method with a prompt that includes both the GitHub issue text and the scraped content, ensuring relevance[1][2][5][7].
+
+---
+
+## Updated Example Workflow
+
+```python
+from urlextract import URLExtract
+from goose3 import Goose
+import litellm  # pip install litellm
+
+# 1. Extract URLs
+extractor = URLExtract()
+urls = extractor.find_urls(issue_text)
+
+# 2. Scrape and extract main content
+g = Goose()
+summaries = []
+for url in urls:
+    article = g.extract(url=url)
+    main_text = article.cleaned_text
+
+    # 3. Summarize with LiteLLM, focusing on relevance to the issue
+    prompt = (
+        f"We have provided context information below.\n"
+        f"---------------------\n"
+        f"{main_text}\n"
+        f"---------------------\n"
+        f"Given this information, please summarize the content with specific relevance to the following GitHub issue:\n"
+        f"{issue_text}"
+    )
+    response = litellm.completion(
+        model="gpt-3.5-turbo",  # or any supported model
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    summary = response.choices[0].message.content
+    summaries.append({'url': url, 'summary': summary})
+
+*Replace `"gpt-3.5-turbo"` with any supported model you prefer (OpenAI, Azure, Hugging Face, etc.)[1][2][7].*
+
+---
+
+## Key Points
+
+- **LiteLLM** allows you to easily swap between LLM providers and models, keeping your summarization pipeline flexible and cost-effective[1][2][7].
+- By constructing the prompt to include both the scraped content and the GitHub issue, you ensure the summary is focused on relevance to the issue[5].
+- The rest of the pipeline (URL extraction and content scraping) remains unchanged.
+
+---
+
+## Summary Table (Updated)
+
+| Step                  | Free/Cheap Tool                | Notes                                              |
+|-----------------------|-------------------------------|----------------------------------------------------|
+| URL Extraction        | URLExtract (`urlextract`)      | Free, simple                                       |
+| Content Extraction    | Goose (`goose3`)               | Free, works on most articles                       |
+| Summarization         | LiteLLM                        | Unified API, supports many models, relevance prompt|
+
+---
+
+**Conclusion:**  
+Integrating LiteLLM as your summarizer enables you to leverage a wide range of LLMs for relevance-focused summarization in your GitHub issue pipeline, with minimal code changes and maximum flexibility[1][2][5][7].
+
+```
 ---
 
 ## Summary Table
