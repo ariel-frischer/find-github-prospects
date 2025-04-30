@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+import traceback  # Added for the moved function
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple  # Added Dict, Any
 
@@ -17,6 +18,75 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 from rich import print
+
+# --- Constants moved from filter_issues_by_prs.py ---
+# Selector for the sidebar section containing "Development"
+DEV_SECTION_SELECTOR = (
+    'div[data-testid="sidebar-section"]:has(h3:has-text("Development"))'
+)
+# Selector for the UL containing linked PRs within the Development section
+LINKED_PR_LIST_SELECTOR = (
+    f"{DEV_SECTION_SELECTOR} ul[data-testid='issue-viewer-linked-pr-container']"
+)
+# Selector for list items (actual PR links) within the container
+LINKED_PR_ITEM_SELECTOR = f"{LINKED_PR_LIST_SELECTOR} li"  # Keep this selector definition for context, though the function uses a more specific one
+
+
+# --- Function moved from filter_issues_by_prs.py ---
+def check_dev_section_for_prs(page: Page, issue_url: str) -> bool:
+    """
+    Uses Playwright to check the GitHub issue page for linked PRs in the
+    'Development' sidebar section. Assumes page is already navigated to issue_url.
+
+    Args:
+        page: The Playwright Page object to use.
+        issue_url: The URL of the GitHub issue (used for logging).
+
+    Returns:
+        True if linked PRs are found in the Development section, False otherwise.
+        Returns False on Playwright errors (e.g., timeout).
+    """
+    print(f"      Checking Development section for linked PRs on {issue_url}...")
+    try:
+        # Wait for the Development section header itself to be visible first
+        page.locator(f'{DEV_SECTION_SELECTOR} h3:has-text("Development")').wait_for(
+            state="visible",
+            timeout=15000,  # Shorter timeout for this check
+        )
+        # print("        - Development section header found.") # Debug
+
+        # Check specifically for anchor tags with '/pull/' in href within the list
+        # This covers open, closed, and merged PRs listed in the Development section
+        linked_pr_links = page.locator(f"{LINKED_PR_LIST_SELECTOR} a[href*='/pull/']")
+        pr_count = linked_pr_links.count()
+
+        if pr_count > 0:
+            print(f"        - Found {pr_count} linked PR(s) in Development section.")
+            return True  # Found one or more linked PRs
+        else:
+            # Section header found, but no PR links within the specific list structure
+            print(
+                "        - Development section found, but no linked PRs detected within it."
+            )
+            return False
+
+    except PlaywrightTimeoutError:
+        # If the Development section header doesn't appear, assume no linked PRs shown
+        print(
+            f"        [yellow]Timeout waiting for Development section on {issue_url}. Assuming no linked PRs.[/yellow]"
+        )
+        return False
+    except PlaywrightError as e:
+        print(
+            f"        [red]Playwright error checking Dev section on {issue_url}: {e}. Assuming no linked PRs.[/red]"
+        )
+        return False
+    except Exception as e:
+        print(
+            f"        [red]Unexpected error checking Dev section on {issue_url}: {e}[/red]"
+        )
+        traceback.print_exc()
+        return False
 
 
 class BrowserIssueChecker:
@@ -190,49 +260,9 @@ class BrowserIssueChecker:
         Returns:
             True if linked PRs are found in the Development section, False otherwise.
         """
-        print(f"      Checking Development section for linked PRs on {issue_url}...")
-        try:
-            # Wait for the Development section header itself to be visible first
-            page.locator(
-                f'{self._DEV_SECTION_SELECTOR} h3:has-text("Development")'
-            ).wait_for(
-                state="visible",
-                timeout=15000,  # Shorter timeout for this check
-            )
-            # print("        - Development section header found.") # Debug
-
-            # Check if the linked PR list container exists within the dev section
-            pr_list_container = page.locator(self._LINKED_PR_LIST_SELECTOR)
-
-            if pr_list_container.count() > 0:
-                # Check if the container actually has any <li> children (PR items)
-                pr_items_count = pr_list_container.locator("li").count()
-                print(f"        - Linked PR list found. Items: {pr_items_count}")
-                return pr_items_count > 0  # True if count > 0
-            else:
-                # Development section exists, but no PR list container found within it
-                print(
-                    "        - Development section found, but no linked PR list container."
-                )
-                return False
-
-        except PlaywrightTimeoutError:
-            # If the Development section header doesn't appear, assume no linked PRs shown
-            print(
-                f"        [yellow]Timeout waiting for Development section on {issue_url}. Assuming no linked PRs.[/yellow]"
-            )
-            return False
-        except PlaywrightError as e:
-            print(
-                f"        [red]Playwright error checking Dev section on {issue_url}: {e}. Assuming no linked PRs.[/red]"
-            )
-            return False
-        except Exception as e:
-            print(
-                f"        [red]Unexpected error checking Dev section on {issue_url}: {e}[/red]"
-            )
-            traceback.print_exc()
-            return False
+        # Call the standalone function, passing the page and URL
+        # The standalone function handles its own logging and exceptions.
+        return check_dev_section_for_prs(page, issue_url)
 
     def _get_new_page(self) -> Page:
         """Creates a new browser page."""
@@ -278,7 +308,7 @@ class BrowserIssueChecker:
             f"https://github.com/{repo_full_name}/issues?q={encoded_query}"
         )
 
-        found_issue_flag = False
+        # found_issue_flag = False # Removed unused variable
         issue_numbers: List[int] = []
         found_issues_details: List[Dict[str, Any]] = []  # Store full details
 
@@ -328,7 +358,7 @@ class BrowserIssueChecker:
                 )
 
                 if count > 0:
-                    found_issue_flag = True
+                    # found_issue_flag = True # Removed unused variable assignment
                     # Extract issue numbers from links within rows
                     for i in range(count):
                         row = issue_rows.nth(i)
@@ -407,7 +437,7 @@ class BrowserIssueChecker:
                         print(
                             "[yellow][BrowserChecker] Neither issue rows nor 'no results' message were visible after waiting."
                         )
-                    found_issue_flag = False  # Ensure flag is False
+                    # found_issue_flag = False # Removed unused variable assignment
 
             except PlaywrightTimeoutError:
                 print(
@@ -418,23 +448,23 @@ class BrowserIssueChecker:
                 print(
                     f"[yellow][BrowserChecker] Playwright error checking results for {repo_full_name}: {pe}. Assuming no matching issues."
                 )
-                found_issue_flag = False
+                # found_issue_flag = False # Removed unused variable assignment
 
         except PlaywrightTimeoutError:
             print(
                 f"[red][BrowserChecker] Timeout error during navigation or interaction for {repo_full_name}."
             )
-            found_issue_flag = False
+            # found_issue_flag = False # Removed unused variable assignment
         except PlaywrightError as pe:
             print(
                 f"[red][BrowserChecker] Playwright error during check for {repo_full_name}: {pe}"
             )
-            found_issue_flag = False
+            # found_issue_flag = False # Removed unused variable assignment
         except Exception as e:
             print(
                 f"[red][BrowserChecker] Unexpected error checking {repo_full_name}: {e}"
             )
-            found_issue_flag = False
+            # found_issue_flag = False # Removed unused variable assignment
         finally:
             if page:
                 try:

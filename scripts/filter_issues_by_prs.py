@@ -35,18 +35,9 @@ sys.path.insert(0, str(project_root))
 #     print("Ensure the script is run from the project root or the package is installed.")
 #     sys.exit(1)
 
+# Import the moved function *after* sys.path is updated
+from repobird_leadgen.browser_checker import check_dev_section_for_prs  # noqa: E402
 
-# --- Playwright Selectors ---
-# Selector for the sidebar section containing "Development"
-DEV_SECTION_SELECTOR = (
-    'div[data-testid="sidebar-section"]:has(h3:has-text("Development"))'
-)
-# Selector for the UL containing linked PRs within the Development section
-LINKED_PR_LIST_SELECTOR = (
-    f"{DEV_SECTION_SELECTOR} ul[data-testid='issue-viewer-linked-pr-container']"
-)
-# Selector for list items (actual PR links) within the container
-LINKED_PR_ITEM_SELECTOR = f"{LINKED_PR_LIST_SELECTOR} li"
 # Selector for the "Closed" state label within the *fixed* (non-sticky) header metadata section
 CLOSED_STATE_SELECTOR = 'div[data-testid="issue-metadata-fixed"] span[data-testid="header-state"]:has-text("Closed")'
 
@@ -63,70 +54,7 @@ CLOSED_STATE_SELECTOR = 'div[data-testid="issue-metadata-fixed"] span[data-testi
 # Functions get_github_instance and wait_for_rate_limit_reset removed as they are no longer used.
 
 
-# --- Playwright Check Function ---
-
-
-def check_dev_section_for_prs(page: Page, issue_url: str) -> bool:
-    """
-    Uses Playwright to check the GitHub issue page for linked PRs in the
-    'Development' sidebar section.
-
-    Args:
-        page: The Playwright Page object to use.
-        issue_url: The URL of the GitHub issue.
-
-    Returns:
-        True if linked PRs are found in the Development section, False otherwise.
-        Returns False on Playwright errors (e.g., timeout).
-    """
-    print(f"        Checking URL (Playwright): {issue_url}")
-    try:
-        page.goto(
-            issue_url, wait_until="domcontentloaded", timeout=45000
-        )  # Increased timeout
-
-        # Wait for the Development section header to be visible (or timeout)
-        # This helps ensure the sidebar has loaded before checking the list
-        page.locator(f'{DEV_SECTION_SELECTOR} h3:has-text("Development")').wait_for(
-            state="visible",
-            timeout=20000,  # Shorter timeout for this specific wait
-        )
-        print("          - Development section header found.")
-
-        # Check specifically for anchor tags with '/pull/' in href within the list
-        # This covers open, closed, and merged PRs listed in the Development section
-        linked_pr_links = page.locator(f"{LINKED_PR_LIST_SELECTOR} a[href*='/pull/']")
-        pr_count = linked_pr_links.count()
-
-        if pr_count > 0:
-            print(f"          - Found {pr_count} linked PR(s) in Development section.")
-            return True  # Found one or more linked PRs
-        else:
-            # Section header found, but no PR links within the specific list structure
-            print(
-                "          - Development section found, but no linked PRs detected within it."
-            )
-            return False
-
-    except PlaywrightTimeoutError:
-        print(
-            f"        [yellow]Timeout waiting for elements on {issue_url}. Assuming no linked PRs.[/yellow]"
-        )
-        return False  # Assume no PRs if section doesn't load
-    except PlaywrightError as e:
-        print(
-            f"        [red]Playwright error checking {issue_url}: {e}. Assuming no linked PRs.[/red]"
-        )
-        return False  # Assume no PRs on error
-    except Exception as e:
-        print(
-            f"        [red]Unexpected error during Playwright check for {issue_url}: {e}[/red]"
-        )
-        traceback.print_exc()
-        return False  # Assume no PRs on unexpected error
-    finally:
-        # Add a small delay to avoid overwhelming GitHub
-        time.sleep(1.0)  # 1 second delay
+# --- Playwright Check Function (Moved to browser_checker.py) ---
 
 
 def is_issue_closed(page: Page) -> bool:
