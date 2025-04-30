@@ -47,6 +47,9 @@ LINKED_PR_LIST_SELECTOR = (
 )
 # Selector for list items (actual PR links) within the container
 LINKED_PR_ITEM_SELECTOR = f"{LINKED_PR_LIST_SELECTOR} li"
+# Selector for the "Closed" state label within the *fixed* (non-sticky) header metadata section
+CLOSED_STATE_SELECTOR = 'div[data-testid="issue-metadata-fixed"] span[data-testid="header-state"]:has-text("Closed")'
+
 
 # --- GitHub API Interaction (Keep for potential future use or remove if fully switching) ---
 
@@ -90,24 +93,18 @@ def check_dev_section_for_prs(page: Page, issue_url: str) -> bool:
         )
         print("          - Development section header found.")
 
-        # Check if the linked PR list container exists
-        pr_list_container = page.locator(LINKED_PR_LIST_SELECTOR)
+        # Check specifically for anchor tags with '/pull/' in href within the list
+        # This covers open, closed, and merged PRs listed in the Development section
+        linked_pr_links = page.locator(f"{LINKED_PR_LIST_SELECTOR} a[href*='/pull/']")
+        pr_count = linked_pr_links.count()
 
-        if pr_list_container.count() > 0:
-            # Check if the container actually has any <li> children (PR items)
-            pr_items_count = pr_list_container.locator("li").count()
-            print(
-                f"          - Linked PR list container found. Items: {pr_items_count}"
-            )
-            if pr_items_count > 0:
-                return True  # Found the list with PR items
-            else:
-                # Container exists but is empty
-                return False
+        if pr_count > 0:
+            print(f"          - Found {pr_count} linked PR(s) in Development section.")
+            return True  # Found one or more linked PRs
         else:
-            # Development section exists, but no PR list container found within it
+            # Section header found, but no PR links within the specific list structure
             print(
-                "          - Development section found, but no linked PR list container."
+                "          - Development section found, but no linked PRs detected within it."
             )
             return False
 
@@ -130,6 +127,29 @@ def check_dev_section_for_prs(page: Page, issue_url: str) -> bool:
     finally:
         # Add a small delay to avoid overwhelming GitHub
         time.sleep(1.0)  # 1 second delay
+
+
+def is_issue_closed(page: Page) -> bool:
+    """Checks if the issue page header shows the 'Closed' state."""
+    try:
+        # Check if the "Closed" state element exists and is visible
+        closed_label = page.locator(CLOSED_STATE_SELECTOR)
+        if closed_label.count() > 0 and closed_label.is_visible(
+            timeout=5000
+        ):  # Short timeout
+            print("          - Issue state is 'Closed'.")
+            return True
+        else:
+            # print("          - Issue state is not 'Closed'.") # Debug
+            return False
+    except PlaywrightTimeoutError:
+        print("          - Timeout checking issue state. Assuming not closed.")
+        return False  # Assume open if state check times out
+    except Exception as e:
+        print(
+            f"          [yellow]Warning: Error checking issue state: {e}. Assuming not closed.[/yellow]"
+        )
+        return False  # Assume open on error
 
 
 # --- Main Application Logic ---
@@ -185,7 +205,8 @@ def main(
             repos_read = 0
             repos_written = 0
             issues_checked = 0
-            issues_removed = 0
+            issues_removed_pr = 0  # Renamed counter for PRs
+            issues_removed_closed = 0  # New counter for closed issues
             errors_parsing = 0
             errors_api = 0  # Keep for potential non-playwright errors
 
@@ -274,25 +295,61 @@ def main(
                                     continue
 
                                 try:
-                                    print(
-                                        f"      Checking issue #{issue_number} for linked PRs via Playwright..."
+                                    # Announce which issue is being checked *before* navigation
+                                    print(f"      Checking issue #{issue_number}...")
+                                    print(f"        URL: {issue_url}")
+
+                                    # Navigate to the issue page (needed for both checks)
+                                    page.goto(
+                                        issue_url,
+                                        wait_until="domcontentloaded",
+                                        timeout=45000,
                                     )
-                                    # Call the new Playwright check function
-                                    if not check_dev_section_for_prs(page, issue_url):
+
+                                    # 1. Check if issue is closed
+                                    if is_issue_closed(page):
                                         print(
-                                            f"        [green]Keeping issue #{issue_number} (no linked PRs found in Dev section).[/green]"
+                                            f"        [yellow]Removing issue #{issue_number} (state is 'Closed').[/yellow]"
                                         )
-                                        filtered_issues.append(issue_data)
-                                    else:
+                                        issues_removed_closed += (
+                                            1  # Increment closed counter
+                                        )
+                                        time.sleep(0.5)  # Small delay after check
+                                        continue  # Skip to next issue
+
+                                    # 2. If open, check for linked PRs
+                                    # No need to print issue number again here
+                                    if check_dev_section_for_prs(
+                                        page,
+                                        issue_url,  # Pass URL for logging inside the function
+                                    ):  # check_dev_section_for_prs already includes delay
                                         print(
                                             f"        [yellow]Removing issue #{issue_number} (linked PR found in Dev section).[/yellow]"
                                         )
-                                        issues_removed += 1
-                                # REMOVED: Old GitHub API exception handling for has_linked_pr
-                                # except RateLimitExceededException: ...
-                                except (
-                                    Exception
-                                ) as e:  # Catch general errors during the check loop
+                                        issues_removed_pr += 1  # Increment PR counter
+                                    else:
+                                        print(
+                                            f"        [green]Keeping issue #{issue_number} (Open, no linked PRs found in Dev section).[/green]"
+                                        )
+                                        filtered_issues.append(issue_data)
+
+                                except PlaywrightTimeoutError:
+                                    print(
+                                        f"        [red]Timeout navigating to or checking {issue_url}. Keeping issue.[/red]"
+                                    )
+                                    errors_api += 1
+                                    filtered_issues.append(
+                                        issue_data
+                                    )  # Keep on timeout
+                                except PlaywrightError as e:
+                                    print(
+                                        f"        [red]Playwright error checking {issue_url}: {e}. Keeping issue.[/red]"
+                                    )
+                                    errors_api += 1
+                                    filtered_issues.append(
+                                        issue_data
+                                    )  # Keep on playwright error
+                                except Exception as e:  # Catch other general errors during the check loop
                                     print(
                                         f"    [red]Error processing issue #{issue_number} in {repo_full_name}: {e}. Skipping issue check, keeping issue.[/red]"
                                     )
@@ -344,9 +401,12 @@ def main(
 
                 print("\n--- PR Filter Summary ---")
                 print(f"  Repositories read: {repos_read}")
-                print(f"  Repositories written (with PR-free issues): {repos_written}")
+                print(
+                    f"  Repositories written (with remaining issues): {repos_written}"
+                )
                 print(f"  Total issues checked: {issues_checked}")
-                print(f"  Issues removed (due to linked PRs): {issues_removed}")
+                print(f"  Issues removed (state was 'Closed'): {issues_removed_closed}")
+                print(f"  Issues removed (due to linked PRs): {issues_removed_pr}")
                 if errors_parsing > 0:
                     print(
                         f"  [yellow]Lines skipped due to parsing errors: {errors_parsing}[/yellow]"

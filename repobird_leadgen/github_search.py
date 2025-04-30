@@ -615,8 +615,10 @@ class GitHubSearcher:
                                 has_label_initially, issue_details_for_cache = (
                                     self.issue_cache[cache_key]
                                 )
+                                # Set repo_qualifies based on the cached value
+                                repo_qualifies = has_label_initially
                                 print(
-                                    f"  [Cache Hit] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label_initially}"
+                                    f"  [Cache Hit] Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}"
                                 )
                             else:
                                 # Cache Miss - Perform live basic label check
@@ -629,9 +631,10 @@ class GitHubSearcher:
 
                                 if self.use_browser_checker and checker_context:
                                     try:
+                                        # Pass max_linked_prs to the browser checker
                                         check_result = (
                                             checker_context.check_repo_for_issue_label(
-                                                repo_full_name, label
+                                                repo_full_name, label, max_linked_prs
                                             )
                                         )
                                     except Exception as browser_err:
@@ -673,9 +676,18 @@ class GitHubSearcher:
                                         issue_details_from_check,  # Write details to internal cache file
                                         repo.html_url,
                                     )
-                                    issue_details_for_cache = issue_details_from_check  # Use details from check
+                                    # Use the result from the check
+                                    issue_details_for_cache = issue_details_from_check
+                                    repo_qualifies = has_label_initially
+
+                                    # Update internal memory cache ONLY (already appended to file above)
+                                    self.issue_cache[cache_key] = (
+                                        repo_qualifies,
+                                        issue_details_for_cache,
+                                    )
+                                    # REMOVED duplicate call to self._append_to_issue_cache here
                                     print(
-                                        f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {has_label_initially}. Cached."
+                                        f"  [Check Done] Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}. Cached."
                                     )
                                 else:
                                     # Check failed, cannot determine label presence
@@ -684,24 +696,20 @@ class GitHubSearcher:
                                     )
                                     continue  # Skip to next repo
 
-                            # Qualify based on the initial check result
-                            repo_qualifies = has_label_initially
-                            # Determine issue numbers list for basic path
-                            if repo_qualifies:
-                                # If browser check provided details, extract numbers
-                                # Assuming the dicts in issue_details_for_cache have a 'number' key
-                                # Filter out None values explicitly
-                                found_issue_numbers = [
-                                    num
-                                    for item in issue_details_for_cache
-                                    if isinstance(item, dict)
-                                    and (num := item.get("number")) is not None
-                                ]
-                            else:
-                                found_issue_numbers = []  # Ensure it's an empty list if not qualified
+                            # Determine issue numbers list from the potentially filtered details
+                            found_issue_numbers = [
+                                num
+                                for item in issue_details_for_cache  # Use the final list
+                                if isinstance(item, dict)
+                                and (num := item.get("number")) is not None
+                            ]
+                            # REMOVED: Redundant qualification check based on found_issue_numbers
+                            # repo_qualifies = bool(found_issue_numbers)
+
                         # --- Qualification Logic --- END
 
                         # --- Process Qualified Repo ---
+                        # Use the repo_qualifies flag determined by the initial check (cache or live)
                         if repo_qualifies:
                             found_count += 1
                             pbar.update(1)

@@ -40,6 +40,14 @@ class BrowserIssueChecker:
     # Target the BDI element containing the title text using its data-testid
     _ISSUE_TITLE_SELECTOR = 'bdi[data-testid="issue-title"]'
     _ISSUE_BODY_SELECTOR = 'div.markdown-body[data-testid="markdown-body"]'
+    # Selectors for Development section PR check
+    _DEV_SECTION_SELECTOR = (
+        'div[data-testid="sidebar-section"]:has(h3:has-text("Development"))'
+    )
+    _LINKED_PR_LIST_SELECTOR = (
+        f"{_DEV_SECTION_SELECTOR} ul[data-testid='issue-viewer-linked-pr-container']"
+    )
+    _LINKED_PR_ITEM_SELECTOR = f"{_LINKED_PR_LIST_SELECTOR} li"
 
     # Increase default timeout significantly for debugging
     def __init__(
@@ -152,6 +160,9 @@ class BrowserIssueChecker:
             title = title.strip()
             description = description.strip()
 
+            title = title.strip()
+            description = description.strip()
+
             print(f"      Title: '{title[:50]}...'")
             return {"title": title, "description": description}
 
@@ -167,6 +178,62 @@ class BrowserIssueChecker:
             print(f"      [red]Unexpected error fetching details for {issue_url}: {e}")
             return None
 
+    def _check_issue_for_linked_prs(self, page: Page, issue_url: str) -> bool:
+        """
+        Checks the specific issue page's 'Development' section for linked PRs.
+        Assumes the page is already navigated to the issue_url.
+
+        Args:
+            page: The Playwright Page object (already navigated).
+            issue_url: The URL of the issue (used for logging).
+
+        Returns:
+            True if linked PRs are found in the Development section, False otherwise.
+        """
+        print(f"      Checking Development section for linked PRs on {issue_url}...")
+        try:
+            # Wait for the Development section header itself to be visible first
+            page.locator(
+                f'{self._DEV_SECTION_SELECTOR} h3:has-text("Development")'
+            ).wait_for(
+                state="visible",
+                timeout=15000,  # Shorter timeout for this check
+            )
+            # print("        - Development section header found.") # Debug
+
+            # Check if the linked PR list container exists within the dev section
+            pr_list_container = page.locator(self._LINKED_PR_LIST_SELECTOR)
+
+            if pr_list_container.count() > 0:
+                # Check if the container actually has any <li> children (PR items)
+                pr_items_count = pr_list_container.locator("li").count()
+                print(f"        - Linked PR list found. Items: {pr_items_count}")
+                return pr_items_count > 0  # True if count > 0
+            else:
+                # Development section exists, but no PR list container found within it
+                print(
+                    "        - Development section found, but no linked PR list container."
+                )
+                return False
+
+        except PlaywrightTimeoutError:
+            # If the Development section header doesn't appear, assume no linked PRs shown
+            print(
+                f"        [yellow]Timeout waiting for Development section on {issue_url}. Assuming no linked PRs.[/yellow]"
+            )
+            return False
+        except PlaywrightError as e:
+            print(
+                f"        [red]Playwright error checking Dev section on {issue_url}: {e}. Assuming no linked PRs.[/red]"
+            )
+            return False
+        except Exception as e:
+            print(
+                f"        [red]Unexpected error checking Dev section on {issue_url}: {e}[/red]"
+            )
+            traceback.print_exc()
+            return False
+
     def _get_new_page(self) -> Page:
         """Creates a new browser page."""
         if not self._browser:
@@ -181,7 +248,7 @@ class BrowserIssueChecker:
             raise
 
     def check_repo_for_issue_label(
-        self, repo_full_name: str, label: str
+        self, repo_full_name: str, label: str, max_linked_prs: Optional[int] = None
     ) -> Tuple[bool, List[Dict[str, Any]]]:
         """
         Checks a repository's issues page via Playwright for open issues matching the query.
@@ -303,14 +370,35 @@ class BrowserIssueChecker:
                                         "description": details["description"],
                                     }
                                 )
-                            else:
+
+                                # --- Check for linked PRs if max_linked_prs is 0 ---
+                                if max_linked_prs == 0:
+                                    # Reuse the page, which is already at the issue URL
+                                    has_prs = self._check_issue_for_linked_prs(
+                                        page, issue_url
+                                    )
+                                    if has_prs:
+                                        print(
+                                            f"      [!] Issue #{issue_num} has linked PRs in Dev section. Excluding from results."
+                                        )
+                                        # Remove the details we just added
+                                        found_issues_details.pop()
+                                    else:
+                                        print(
+                                            f"      [+] Issue #{issue_num} has no linked PRs in Dev section. Keeping."
+                                        )
+                                # --- End PR check ---
+
+                            else:  # Details fetch failed
                                 print(
-                                    f"    [yellow]Skipping details for issue {issue_num} due to fetch error."
+                                    f"    [yellow]Skipping details and PR check for issue {issue_num} due to fetch error."
                                 )
                             time.sleep(0.5)  # Small delay between issue detail fetches
-                        print("  Finished fetching details.")
+                        print(
+                            "  Finished fetching details and checking PRs (if applicable)."
+                        )
 
-                else:
+                else:  # No issue rows found initially
                     # No issue rows found, check if the "no results" message is visible
                     no_results_element = page.locator(self._NO_RESULTS_SELECTOR)
                     if no_results_element.is_visible():
@@ -357,8 +445,9 @@ class BrowserIssueChecker:
             # print(f"[BrowserChecker] Waiting {self.check_delay:.1f}s before next check...")
             time.sleep(self.check_delay)
 
-        # Return the flag and the list of issue details (will be empty if flag is False)
-        return found_issue_flag, found_issues_details  # Return details list
+        # Return True only if the *final* list of details is non-empty
+        final_found_flag = bool(found_issues_details)
+        return final_found_flag, found_issues_details
 
 
 # Example Usage (for testing)
