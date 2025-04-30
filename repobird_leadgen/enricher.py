@@ -111,9 +111,13 @@ class Enricher:
             body_selector = (
                 'div.markdown-body[data-testid="markdown-body"]'  # Body content area
             )
-            # Comment selectors remain the same
-            comment_selector = "div.js-comment.unminimized-comment"
-            comment_body_selector = ".js-comment-body"
+            # Updated comment selectors based on observed HTML structure
+            # Select the outer container for each timeline item (comment, event, etc.)
+            comment_container_selector = (
+                "div.LayoutHelpers-module__timelineElement--tFGhF"
+            )
+            # Select the markdown body within a comment item
+            comment_body_selector = 'div[data-testid="markdown-body"]'
 
             # 1. Wait for container elements to be attached (ensures structure exists)
             print(f"    Waiting for title container: '{title_container_selector}'")
@@ -147,33 +151,81 @@ class Enricher:
             body = body.strip()
             print(f"    Body found: '{body[:50]}...'")
 
-            # 3. Get comments (more robustly)
-            print(f"    Locating comment blocks: '{comment_selector}'")
+            # 3. Get comments (using updated selectors and logic)
+            print(f"    Locating comment containers: '{comment_container_selector}'")
             comments = []
-            comment_blocks = page.locator(comment_selector)
-            comment_count = comment_blocks.count()
-            print(f"    Found {comment_count} potential comment blocks.")
+            # Locate all timeline elements
+            timeline_elements = page.locator(comment_container_selector)
+            timeline_count = timeline_elements.count()
+            print(f"    Found {timeline_count} potential timeline elements.")
 
-            # Iterate through comment blocks, skipping the first one (which is the issue body)
-            if comment_count > 1:
-                for i in range(1, comment_count):  # Start from 1 to skip issue body
-                    comment_block = comment_blocks.nth(i)
-                    # Find the comment body within this block
-                    comment_body_elem = comment_block.locator(
+            # Identify the main issue body element to skip it during comment iteration
+            main_body_element = page.locator(body_container_selector).first
+
+            for i in range(timeline_count):
+                timeline_element = timeline_elements.nth(i)
+
+                # Check if this timeline element contains the main issue body
+                # We can do this by checking if the main body element is an ancestor
+                # or if the timeline element itself contains the specific body selector
+                # A simpler check might be to see if it contains our specific body_selector
+                # and if that element matches the one we already found.
+                potential_body_in_timeline = timeline_element.locator(
+                    body_selector
+                ).first
+                is_main_body = False
+                if potential_body_in_timeline.count() > 0:
+                    # Check if this potential body element is the same as the main one we found earlier
+                    # This requires comparing the elements directly, which can be tricky.
+                    # A simpler heuristic: assume the *first* timeline element containing
+                    # the body_selector is the main issue body.
+                    # Let's refine: Check if the timeline element *contains* the main_body_element we located.
+                    # Playwright doesn't have a direct 'contains' for elements.
+                    # Alternative: Check if the timeline element's outer HTML contains the main body's outer HTML (less reliable).
+                    # Let's stick to the assumption: the first timeline element containing a 'markdown-body' is the main issue.
+                    # We already have the main body text. Let's find the body within this timeline element
+                    # and compare its text content.
+
+                    current_body_elem = timeline_element.locator(
                         comment_body_selector
                     ).first
-                    if comment_body_elem:
+                    if current_body_elem.count() > 0:
+                        current_body_text = (
+                            current_body_elem.text_content(timeout=self.timeout / 4)
+                            or ""
+                        )
+                        # Compare stripped text content - might be fragile if body is empty/identical to a comment
+                        if (
+                            current_body_text.strip() == body
+                        ):  # Compare with the main body text we scraped
+                            # More robust check might be needed if bodies can be identical
+                            # For now, assume the first match is the main body
+                            if not comments:  # If we haven't added any comments yet, this is likely the main body
+                                print(
+                                    f"    Skipping timeline element {i} (identified as main issue body)."
+                                )
+                                is_main_body = True
+
+                if not is_main_body:
+                    # This is likely a comment, try to extract its body
+                    comment_body_elem = timeline_element.locator(
+                        comment_body_selector
+                    ).first
+                    if comment_body_elem.count() > 0:
                         text = (
                             comment_body_elem.text_content(timeout=self.timeout / 2)
                             or ""
                         )
                         text = text.strip()
                         if text:
+                            print(
+                                f"    Found comment in timeline element {i}: '{text[:50]}...'"
+                            )
                             comments.append(text)
-                    else:
-                        print(
-                            f"    [yellow]Warning: Could not find comment body within comment block {i}.[/yellow]"
-                        )
+                        # else: # Optional: log if a comment body was found but empty
+                        #    print(f"    Timeline element {i} has an empty comment body.")
+                    # else: # Optional: log if a timeline element didn't contain a comment body
+                    #    print(f"    Timeline element {i} did not contain a comment body selector '{comment_body_selector}'.")
 
             print(
                 f"    Scraped: Title='{title[:50]}...', Body='{body[:50]}...', Comments={len(comments)}"
