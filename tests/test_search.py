@@ -2,7 +2,7 @@ import copy  # For deep copying repo data
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, call, mock_open, patch  # Added mock_open
+from unittest.mock import MagicMock, mock_open, patch  # Added mock_open
 
 import pytest
 from github import (
@@ -424,7 +424,9 @@ def test_find_qualifying_issues_no_filters(
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
 
-    result = searcher._find_qualifying_issues(repo, "bug", None, None)
+    result = searcher._find_qualifying_issues(
+        repo, "bug", None
+    )  # Removed max_linked_prs=None
 
     assert result  # Check if the list is non-empty
     searcher._execute_with_retry.assert_called_once_with(
@@ -446,7 +448,9 @@ def test_find_qualifying_issues_no_issues_found(
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
 
-    result = searcher._find_qualifying_issues(repo, "bug", None, None)
+    result = searcher._find_qualifying_issues(
+        repo, "bug", None
+    )  # Removed max_linked_prs=None
 
     assert not result  # Check if the list is empty
     searcher._execute_with_retry.assert_called_once_with(
@@ -475,7 +479,9 @@ def test_find_qualifying_issues_age_met(
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
 
-    result = searcher._find_qualifying_issues(repo, "bug", 10, None)  # Max 10 days old
+    result = searcher._find_qualifying_issues(
+        repo, "bug", 10
+    )  # Max 10 days old, Removed max_linked_prs=None
 
     assert result  # Check if the list is non-empty
     searcher._execute_with_retry.assert_called_once_with(
@@ -503,7 +509,9 @@ def test_find_qualifying_issues_age_not_met(
 
     searcher._execute_with_retry = MagicMock(return_value=mock_issues_paginator)
 
-    result = searcher._find_qualifying_issues(repo, "bug", 10, None)  # Max 10 days old
+    result = searcher._find_qualifying_issues(
+        repo, "bug", 10
+    )  # Max 10 days old, Removed max_linked_prs=None
 
     assert not result  # Check if the list is empty
     searcher._execute_with_retry.assert_called_once_with(
@@ -532,13 +540,17 @@ def test_find_qualifying_issues_pr_met(
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
+    result = searcher._find_qualifying_issues(
+        repo, "bug", None
+    )  # Removed max_linked_prs=2
 
     assert result  # Check if the list is non-empty
+    # PR check is now handled outside this function, so no need to check _get_linked_prs_count here
     # _execute_with_retry is called for get_issues AND potentially for get_timeline inside _get_linked_prs_count
     # We only assert the get_issues call here, assuming _get_linked_prs_count works as tested separately
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
-    searcher._get_linked_prs_count.assert_called_once_with(issue1)
+    # PR check is now handled outside this function, so no need to check _get_linked_prs_count here
+    # searcher._get_linked_prs_count.assert_called_once_with(issue1)
 
 
 @pytest.mark.unit
@@ -559,11 +571,14 @@ def test_find_qualifying_issues_pr_not_met(
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
+    result = searcher._find_qualifying_issues(
+        repo, "bug", None
+    )  # Removed max_linked_prs=2
 
-    assert not result  # Check if the list is empty
+    assert result  # Check if the list is non-empty (function only checks age now)
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
-    searcher._get_linked_prs_count.assert_called_once_with(issue1)
+    # PR check is now handled outside this function, so no need to check _get_linked_prs_count here
+    # searcher._get_linked_prs_count.assert_called_once_with(issue1)
 
 
 @pytest.mark.unit
@@ -587,12 +602,15 @@ def test_find_qualifying_issues_pr_count_error(
     mock_execute = MagicMock(return_value=mock_issues_paginator)
     searcher._execute_with_retry = mock_execute
 
-    result = searcher._find_qualifying_issues(repo, "bug", None, 2)  # Max 2 PRs
+    result = searcher._find_qualifying_issues(
+        repo, "bug", None
+    )  # Removed max_linked_prs=2
 
     assert result  # Should qualify based on issue2 (list is non-empty)
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
-    assert searcher._get_linked_prs_count.call_count == 2
-    searcher._get_linked_prs_count.assert_has_calls([call(issue1), call(issue2)])
+    # PR check is now handled outside this function, so no need to check _get_linked_prs_count here
+    # assert searcher._get_linked_prs_count.call_count == 2
+    # searcher._get_linked_prs_count.assert_has_calls([call(issue1), call(issue2)])
 
 
 @pytest.mark.unit
@@ -618,12 +636,15 @@ def test_find_qualifying_issues_age_and_pr_met(
     searcher._execute_with_retry = mock_execute
 
     result = searcher._find_qualifying_issues(
-        repo, "bug", 10, 2
-    )  # Max 10 days, Max 2 PRs
+        repo,
+        "bug",
+        10,  # Removed max_linked_prs=2
+    )  # Max 10 days
 
     assert result  # Check if the list is non-empty
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
-    searcher._get_linked_prs_count.assert_called_once_with(issue_good)
+    # PR check is now handled outside this function, so no need to check _get_linked_prs_count here
+    # searcher._get_linked_prs_count.assert_called_once_with(issue_good)
 
 
 @pytest.mark.unit
@@ -649,12 +670,15 @@ def test_find_qualifying_issues_age_fail_pr_met(
     searcher._execute_with_retry = mock_execute
 
     result = searcher._find_qualifying_issues(
-        repo, "bug", 10, 2
-    )  # Max 10 days, Max 2 PRs
+        repo,
+        "bug",
+        10,  # Removed max_linked_prs=2
+    )  # Max 10 days
 
-    assert not result  # Check if the list is empty
+    assert not result  # Check if the list is empty (age filter should fail)
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
-    searcher._get_linked_prs_count.assert_not_called()  # Should not be called if age fails first
+    # PR check is now handled outside this function, so no need to check _get_linked_prs_count here
+    # searcher._get_linked_prs_count.assert_not_called() # PR check is irrelevant if age fails
 
 
 @pytest.mark.unit
@@ -680,12 +704,15 @@ def test_find_qualifying_issues_age_met_pr_fail(
     searcher._execute_with_retry = mock_execute
 
     result = searcher._find_qualifying_issues(
-        repo, "bug", 10, 2
-    )  # Max 10 days, Max 2 PRs
+        repo,
+        "bug",
+        10,  # Removed max_linked_prs=2
+    )  # Max 10 days
 
-    assert not result  # Check if the list is empty
+    assert result  # Check if the list is non-empty (age filter passes)
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
-    searcher._get_linked_prs_count.assert_called_once_with(issue_young)
+    # PR check is now handled outside this function, so no need to check _get_linked_prs_count here
+    # searcher._get_linked_prs_count.assert_called_once_with(issue_young)
 
 
 @pytest.mark.unit
@@ -718,16 +745,18 @@ def test_find_qualifying_issues_multiple_issues_one_qualifies(
     searcher._execute_with_retry = mock_execute
 
     result = searcher._find_qualifying_issues(
-        repo, "bug", 15, 2
-    )  # Max 15 days, Max 2 PRs
+        repo,
+        "bug",
+        15,  # Removed max_linked_prs=2
+    )  # Max 15 days
 
     assert result  # Should qualify based on issue_good (list is non-empty)
     mock_execute.assert_any_call(repo.get_issues, state="open", labels=["bug"])
-    # Check PR count calls: Should be called for issue_many_prs (age ok) and issue_good (age ok)
-    assert searcher._get_linked_prs_count.call_count == 2
-    searcher._get_linked_prs_count.assert_has_calls(
-        [call(issue_many_prs), call(issue_good)]
-    )
+    # PR check is now handled outside this function, so no need to check _get_linked_prs_count here
+    # assert searcher._get_linked_prs_count.call_count == 2
+    # searcher._get_linked_prs_count.assert_has_calls(
+    #     [call(issue_many_prs), call(issue_good)]
+    # )
 
 
 # --- Tests for search method with filters --- #
@@ -838,9 +867,9 @@ def assert_issue_cache_dump(
         if isinstance(args[0], dict) and args[0].get("repo") == repo_full_name:
             issue_cache_call = c
             break
-    assert (
-        issue_cache_call is not None
-    ), f"Issue cache dump call not found for {repo_full_name}"
+    assert issue_cache_call is not None, (
+        f"Issue cache dump call not found for {repo_full_name}"
+    )
     args, _ = issue_cache_call
     assert args[0]["repo"] == repo_full_name
     assert args[0]["label"] == label
@@ -895,7 +924,9 @@ def test_search_with_filters_qualifies(mock_print, mock_search_flow):
     mock_search_flow["mock_initial_check"].assert_not_called()
     # Detailed check is always called when filters are active
     mock_search_flow["mock_detailed_check"].assert_called_once_with(
-        repo1, label, max_age, max_prs
+        repo1,
+        label,
+        max_age,  # Removed max_prs from assertion
     )
 
     # Assertions for qualifying case
@@ -958,7 +989,9 @@ def test_search_with_filters_skips_detailed(mock_print, mock_search_flow):
     mock_search_flow["mock_initial_check"].assert_not_called()
     # Detailed check is called (and returns empty list)
     mock_search_flow["mock_detailed_check"].assert_called_once_with(
-        repo1, label, max_age, max_prs
+        repo1,
+        label,
+        max_age,  # Removed max_prs from assertion
     )
 
     # Assert nothing dumped/written to main cache

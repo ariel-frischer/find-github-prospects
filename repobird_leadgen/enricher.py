@@ -9,7 +9,17 @@ from dataclasses import (
 from typing import Any, Dict, List, Optional  # Ensured present
 
 import litellm
-from playwright.sync_api import Page, Playwright, sync_playwright
+from playwright.sync_api import (
+    Error as PlaywrightError,  # Import PlaywrightError
+)
+from playwright.sync_api import (
+    Page,
+    Playwright,
+    sync_playwright,
+)
+from playwright.sync_api import (
+    TimeoutError as PlaywrightTimeoutError,  # Import PlaywrightTimeoutError
+)
 from pydantic import ValidationError
 
 # Removed URLExtract and Goose imports as they are now in url_processor
@@ -105,7 +115,7 @@ class Enricher:
         page = None
         try:
             page = self._get_new_page()
-            logging.info(f"  Scraping: {issue_url} ...")
+            logging.info(f"  Scraping issue: {issue_url}")
             page.goto(issue_url, wait_until="domcontentloaded", timeout=self.timeout)
             logging.info("    Page loaded. Waiting for container elements...")
 
@@ -258,7 +268,7 @@ class Enricher:
         readme_selector = "article.markdown-body"  # Selector for the README content
 
         try:
-            logging.info(f"  Scraping README from: {repo_url} ...")
+            logging.info(f"  Scraping README: {repo_url}")
             page = self._get_new_page()
             page.goto(repo_url, wait_until="domcontentloaded", timeout=self.timeout)
             logging.info("    README page loaded. Waiting for selector...")

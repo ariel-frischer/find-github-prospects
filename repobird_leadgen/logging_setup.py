@@ -3,9 +3,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Rich imports
 from rich.logging import RichHandler
 
 LOGS_DIR = Path("logs")
+
+# --- Custom Logging Handler Removed ---
+
+# --- Setup Function ---
 
 
 def setup_logging(command_name: str, log_level: int = logging.INFO):
@@ -30,11 +35,15 @@ def setup_logging(command_name: str, log_level: int = logging.INFO):
     # File handler should capture everything from the specified level
     file_handler.setLevel(log_level)
 
-    # --- Console Handler (Rich) ---
+    # --- Console Handler (Standard RichHandler) ---
     # Keep console output clean, show INFO and above by default
     # RichHandler automatically handles markup
     console_handler = RichHandler(
-        level=logging.INFO, rich_tracebacks=True, show_path=False, show_time=False
+        level=logging.INFO,  # Show INFO and above on console
+        rich_tracebacks=True,
+        show_path=False,  # Don't show module path
+        show_time=False,  # Don't show timestamp
+        markup=True,  # Enable Rich markup like [bold]
     )
 
     # --- Root Logger Configuration ---

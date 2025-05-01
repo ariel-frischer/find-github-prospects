@@ -7,16 +7,7 @@ from concurrent.futures import (
     as_completed,
 )
 from pathlib import Path
-import json
 import logging  # Import logging
-import multiprocessing
-import queue  # For QueueEmpty exception
-from concurrent.futures import (
-    ProcessPoolExecutor,
-    ThreadPoolExecutor,  # Add this import back
-    as_completed,
-)
-from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, TypeVar
 
 # from rich.console import Console # Remove Console import

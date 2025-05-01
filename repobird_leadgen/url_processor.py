@@ -30,15 +30,15 @@ def _extract_urls(text: str) -> List[str]:
 def _scrape_url_content(url: str) -> Optional[str]:
     """Scrapes the main text content from a URL using Goose."""
     try:
-        logger.info(f"Attempting to scrape URL: {url}")
+        logger.info(f"Scraping URL content: {url}")
         g = Goose()
         article = g.extract(url=url)
         main_text = article.cleaned_text
         if main_text:
-            logger.info(f"Successfully scraped content from URL: {url}")
+            logger.info(f"Scraped content from: {url}")
             return main_text
         else:
-            logger.info(f"No significant text content found at URL: {url}")
+            logger.info(f"No significant text found at: {url}")
             return None
     except Exception as e:
         logger.warning(f"Failed to scrape URL {url}: {e}", exc_info=False)
@@ -50,7 +50,7 @@ def _summarize_content(
 ) -> Optional[str]:
     """Summarizes the scraped content using an LLM, focusing on relevance to the issue."""
     try:
-        logger.info(f"Attempting to summarize content from URL: {url}")
+        logger.info(f"Summarizing content from: {url}")
         # Truncate content if necessary and add indicator
         truncated_content = content[:MAX_CONTENT_LENGTH_FOR_SUMMARY]
         if len(content) > MAX_CONTENT_LENGTH_FOR_SUMMARY:
@@ -80,15 +80,13 @@ def _summarize_content(
         # print(f"response_cost={response_cost}") # Removed print
         summary = response.choices[0].message.content.strip()
         if summary:
-            logger.info(f"Successfully summarized URL: {url}")
+            logger.info(f"Summarized: {url}")
             return summary
         else:
-            logger.warning(f"LLM returned empty summary for URL: {url}")
+            logger.warning(f"LLM returned empty summary for: {url}")
             return None
     except Exception as e:
-        logger.warning(
-            f"LLM summarization failed for URL {url}: {e}", exc_info=True
-        )
+        logger.warning(f"LLM summarization failed for URL {url}: {e}", exc_info=True)
         return None
 
 
@@ -111,9 +109,7 @@ def process_urls_for_issue(
     url_summaries: List[Dict[str, str]] = []
     try:
         urls = _extract_urls(combined_text)
-        logger.info(
-            f"Found {len(urls)} unique URLs in issue {issue_url_for_logging}"
-        )
+        logger.info(f"Found {len(urls)} unique URLs in issue: {issue_url_for_logging}")
 
         if not urls:
             return url_summaries

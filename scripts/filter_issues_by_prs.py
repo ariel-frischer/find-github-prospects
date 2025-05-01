@@ -1,7 +1,9 @@
 import json
+
+# from rich import print # Remove print import
+import logging  # Import logging
 import sys
 import time
-import traceback
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -18,8 +20,6 @@ from playwright.sync_api import (
 from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
-# from rich import print # Remove print import
-import logging # Import logging
 from rich.progress import Progress
 
 # Add project root to sys.path to allow importing repobird_leadgen modules
@@ -38,8 +38,9 @@ sys.path.insert(0, str(project_root))
 
 # Import the moved function *after* sys.path is updated
 from repobird_leadgen.browser_checker import check_dev_section_for_prs  # noqa: E402
+
 # Import logging setup *after* sys.path is updated
-from repobird_leadgen.logging_setup import setup_logging # noqa: E402
+from repobird_leadgen.logging_setup import setup_logging  # noqa: E402
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -80,9 +81,7 @@ def is_issue_closed(page: Page) -> bool:
         logger.warning("Timeout checking issue state. Assuming not closed.")
         return False  # Assume open if state check times out
     except Exception as e:
-        logger.warning(
-            f"Error checking issue state: {e}. Assuming not closed."
-        )
+        logger.warning(f"Error checking issue state: {e}. Assuming not closed.")
         return False  # Assume open on error
 
 
@@ -123,9 +122,7 @@ def main(
     # Setup logging for this script run
     setup_logging("filter_prs")
 
-    logger.info(
-        f"Starting PR filter (using Playwright) for: {input_file}"
-    )
+    logger.info(f"Starting PR filter (using Playwright) for: {input_file}")
     logger.warning("This script will modify the file in-place.")
     logger.info("Initializing Playwright...")
 
@@ -165,7 +162,8 @@ def main(
                             "Could not determine file length for progress bar."
                         )
                         task = progress.add_task(
-                            "[cyan]Filtering repos...", total=None # Indeterminate
+                            "[cyan]Filtering repos...",
+                            total=None,  # Indeterminate
                         )
 
                     for line in infile:
@@ -233,8 +231,9 @@ def main(
 
                                 try:
                                     # Announce which issue is being checked *before* navigation
-                                    logger.info(f"Checking issue #{issue_number}...")
-                                    logger.debug(f"URL: {issue_url}")
+                                    logger.info(
+                                        f"Checking issue #{issue_number}: {issue_url}"
+                                    )
 
                                     # Navigate to the issue page (needed for both checks)
                                     page.goto(
@@ -342,8 +341,12 @@ def main(
                     f"  Repositories written (with remaining issues): {repos_written}"
                 )
                 logger.info(f"  Total issues checked: {issues_checked}")
-                logger.info(f"  Issues removed (state was 'Closed'): {issues_removed_closed}")
-                logger.info(f"  Issues removed (due to linked PRs): {issues_removed_pr}")
+                logger.info(
+                    f"  Issues removed (state was 'Closed'): {issues_removed_closed}"
+                )
+                logger.info(
+                    f"  Issues removed (due to linked PRs): {issues_removed_pr}"
+                )
                 if errors_parsing > 0:
                     logger.warning(
                         f"  Lines skipped due to parsing errors: {errors_parsing}"

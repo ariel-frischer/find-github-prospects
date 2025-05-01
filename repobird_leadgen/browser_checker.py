@@ -5,6 +5,7 @@ import logging  # Import logging
 import re
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone  # Add datetime imports
 from typing import Any, Dict, List, Optional, Tuple  # Added Dict, Any
 
 from playwright.sync_api import (
@@ -48,7 +49,7 @@ def check_dev_section_for_prs(page: Page, issue_url: str) -> bool:
         True if linked PRs are found in the Development section, False otherwise.
         Returns False on Playwright errors (e.g., timeout).
     """
-    logger.info(f"Checking Development section for linked PRs on {issue_url}...")
+    logger.info(f"Checking Dev section for PRs: {issue_url}")
     try:
         # Wait for the Development section header itself to be visible first
         page.locator(f'{DEV_SECTION_SELECTOR} h3:has-text("Development")').wait_for(
@@ -63,15 +64,11 @@ def check_dev_section_for_prs(page: Page, issue_url: str) -> bool:
         pr_count = linked_pr_links.count()
 
         if pr_count > 0:
-            logger.info(
-                f"Found {pr_count} linked PR(s) in Development section for {issue_url}."
-            )
+            logger.info(f"Found {pr_count} linked PR(s) in Dev section: {issue_url}")
             return True  # Found one or more linked PRs
         else:
             # Section header found, but no PR links within the specific list structure
-            logger.info(
-                f"Development section found, but no linked PRs detected within it for {issue_url}."
-            )
+            logger.info(f"Dev section found, no linked PRs detected: {issue_url}")
             return False
 
     except PlaywrightTimeoutError:
@@ -98,10 +95,12 @@ class BrowserIssueChecker:
     _ISSUE_FILTER_INPUT_SELECTOR = (
         "input#repository-input"  # Updated selector based on inspection
     )
-    # Use data-testid for issue rows
-    _ISSUE_ROW_SELECTOR = "div[data-testid='issue-row']"
     # Use data-testid for the issue link/title within a row
-    _ISSUE_LINK_SELECTOR = "a[data-testid='issue-title-link']"
+    _ISSUE_LINK_SELECTOR = (
+        "a[data-testid='issue-pr-title-link']"  # Updated based on HTML
+    )
+    # Target the list item containing the specific issue link
+    _ISSUE_ROW_SELECTOR = f"li:has({_ISSUE_LINK_SELECTOR})"
     # Selector for the 'no results' message container (seems stable enough)
     _NO_RESULTS_SELECTOR = "div.blankslate"
     # Regex to extract issue number from the href of the issue link
@@ -183,7 +182,7 @@ class BrowserIssueChecker:
         self, page: Page, issue_url: str
     ) -> Optional[Dict[str, str]]:
         """Navigates to an issue URL and extracts title and description."""
-        logger.info(f"Fetching details for: {issue_url}")
+        logger.info(f"Fetching details: {issue_url}")
         try:
             page.goto(issue_url, wait_until="domcontentloaded", timeout=self.timeout)
             # Wait for container elements to be attached, give full timeout
@@ -280,7 +279,11 @@ class BrowserIssueChecker:
             raise
 
     def check_repo_for_issue_label(
-        self, repo_full_name: str, label: str, max_linked_prs: Optional[int] = None
+        self,
+        repo_full_name: str,
+        label: str,
+        max_linked_prs: Optional[int] = None,
+        max_issue_age_days: Optional[int] = None,  # Add age filter
     ) -> Tuple[bool, List[Dict[str, Any]]]:
         """
         Checks a repository's issues page via Playwright for open issues matching the query.
@@ -291,6 +294,7 @@ class BrowserIssueChecker:
             label: The issue label to include in the search query.
             max_linked_prs: If 0, issues with linked PRs in the Development section
                             will be excluded. If None or other int, this check is skipped.
+            max_issue_age_days: If provided, only include issues created within this many days.
 
         Returns:
             A tuple: (bool indicating if issues were found, list of issue detail dicts).
@@ -303,10 +307,36 @@ class BrowserIssueChecker:
             return False, []  # Return tuple (bool, list)
 
         page = None
-        # Construct the raw query string, including no:assignee and no:parent-issue
-        raw_query = f'is:issue state:open label:"{label}" no:assignee no:parent-issue'
-        # URL encode the *entire* query string once using quote_plus for query parameters
-        encoded_query = urllib.parse.quote_plus(raw_query)
+        # Construct the raw query string parts
+        query_parts = [
+            "is:issue",
+            "state:open",
+            f'label:"{label}"',
+            "no:assignee",
+            "no:parent-issue",
+        ]
+        # Conditionally add the PR filter
+        if max_linked_prs == 0:
+            query_parts.append("-linked:pr")
+            logger.info("Adding '-linked:pr' to the browser query.")
+        # Conditionally add the age filter
+        if max_issue_age_days is not None:
+            try:
+                cutoff_date = datetime.now(timezone.utc) - timedelta(
+                    days=max_issue_age_days
+                )
+                date_str = cutoff_date.strftime("%Y-%m-%d")
+                query_parts.append(f"created:>{date_str}")
+                logger.info(f"Adding 'created:>{date_str}' to the browser query.")
+            except Exception as e:
+                logger.warning(
+                    f"Could not calculate date for age filter: {e}. Skipping age filter."
+                )
+
+        # Join parts and URL encode
+        raw_query = " ".join(query_parts)
+        # Use quote instead of quote_plus for better space handling in GitHub search UI
+        encoded_query = urllib.parse.quote(raw_query)
         # Construct the final URL
         filtered_issues_url = (
             f"https://github.com/{repo_full_name}/issues?q={encoded_query}"
@@ -320,7 +350,7 @@ class BrowserIssueChecker:
             logger.info(f"BrowserChecker: Getting new page for {repo_full_name}...")
             page = self._get_new_page()
             logger.info(
-                f"BrowserChecker: Navigating directly to filtered URL: {filtered_issues_url}..."
+                f"BrowserChecker: Navigating to filtered URL: {filtered_issues_url}"
             )
             # Navigate directly to the pre-filtered URL
             page.goto(
@@ -409,29 +439,11 @@ class BrowserIssueChecker:
                                         "description": details["description"],
                                     }
                                 )
-
-                                # --- Check for linked PRs if max_linked_prs is 0 ---
-                                if max_linked_prs == 0:
-                                    # Reuse the page, which is already at the issue URL
-                                    has_prs = self._check_issue_for_linked_prs(
-                                        page, issue_url
-                                    )
-                                    if has_prs:
-                                        # Add explicit message about exclusion
-                                        logger.warning(
-                                            f"Issue #{issue_num} has linked PRs. Excluding from results (max_linked_prs=0)."
-                                        )
-                                        # Remove the details we just added
-                                        found_issues_details.pop()
-                                    else:
-                                        logger.info(
-                                            f"Issue #{issue_num} has no linked PRs. Keeping."
-                                        )
-                                # --- End PR check ---
+                            # --- PR check is now handled by the '-linked:pr' query filter ---
 
                             else:  # Details fetch failed
                                 logger.warning(
-                                    f"Skipping details and PR check for issue {issue_num} due to fetch error."
+                                    f"Skipping details fetch for issue {issue_num} due to error."
                                 )
                             time.sleep(0.5)  # Small delay between issue detail fetches
                         logger.info(
@@ -488,6 +500,167 @@ class BrowserIssueChecker:
         final_found_flag = bool(found_issues_details)
         return final_found_flag, found_issues_details
 
+    def verify_issues_no_prs(
+        self,
+        repo_full_name: str,
+        label: str,
+        max_issue_age_days: Optional[int] = None,  # Add age filter
+    ) -> List[int]:
+        """
+        Finds all open issues matching the label and age criteria with zero linked PRs
+        using a browser query. This is used in the hybrid search mode when
+        --max-linked-prs 0 is specified.
+
+        Args:
+            repo_full_name: The 'owner/repo' name string.
+            label: The issue label to search for.
+            max_issue_age_days: If provided, only include issues created within this many days.
+
+        Returns:
+            A list of issue numbers found by the browser query matching the label, age,
+            and the '-linked:pr' filter.
+        """
+        if not self._browser or not self._playwright:
+            logger.error(
+                "BrowserChecker: Playwright/Browser not initialized. Cannot verify issues."
+            )
+            return []
+
+        page = None
+        verified_numbers: List[int] = []
+
+        # Construct the query parts: is:issue is:open -linked:pr label:"label name" [created:>]
+        safe_label = f'"{label}"' if " " in label else label
+        query_parts = [
+            "is:issue",
+            "is:open",
+            "-linked:pr",
+            f"label:{safe_label}",
+        ]
+        # Conditionally add the age filter
+        if max_issue_age_days is not None:
+            try:
+                cutoff_date = datetime.now(timezone.utc) - timedelta(
+                    days=max_issue_age_days
+                )
+                date_str = cutoff_date.strftime("%Y-%m-%d")
+                query_parts.append(f"created:>{date_str}")
+                logger.info(
+                    f"Adding 'created:>{date_str}' to the PR verification query."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not calculate date for age filter in PR verification: {e}. Skipping age filter."
+                )
+
+        # Join parts and URL encode
+        raw_query = " ".join(query_parts)
+        # Use quote instead of quote_plus to encode spaces as %20
+        encoded_query = urllib.parse.quote(raw_query)
+        verify_url = f"https://github.com/{repo_full_name}/issues?q={encoded_query}"
+
+        try:
+            logger.info(
+                f"BrowserChecker: Getting new page for PR verification: {repo_full_name}..."
+            )
+            page = self._get_new_page()
+            logger.info(f"BrowserChecker: Navigating to verification URL: {verify_url}")
+            page.goto(verify_url, wait_until="domcontentloaded", timeout=self.timeout)
+            logger.info("BrowserChecker: Verification page nav successful.")
+
+            # Wait for results (issue rows or no results message)
+            results_selector = (
+                f"{self._ISSUE_ROW_SELECTOR}, {self._NO_RESULTS_SELECTOR}"
+            )
+            logger.info(
+                f"BrowserChecker: Waiting for verification results element '{results_selector}'..."
+            )
+            # --- Wait for the UL inside the container to be attached ---
+            # Note: Assuming the outer container logic is handled elsewhere or implicitly by Playwright's wait strategy.
+            # We focus on waiting for the list UL itself.
+            list_ul_selector = "ul[data-listview-component='items-list']"
+            logger.info(
+                f"BrowserChecker: Waiting for list UL '{list_ul_selector}' to be attached..."
+            )
+            list_ul_locator = page.locator(list_ul_selector)  # Locate the UL directly
+            list_ul_locator.wait_for(state="attached", timeout=self.timeout)
+            logger.info("BrowserChecker: List UL is attached.")
+            # --- UL is attached, now check its contents ---
+
+            # Explicitly check if the "No results" message is visible within the UL
+            no_results_element = list_ul_locator.locator(self._NO_RESULTS_SELECTOR)
+            if no_results_element.count() > 0 and no_results_element.is_visible(
+                timeout=5000  # Short timeout for visibility check
+            ):
+                logger.info(
+                    "BrowserChecker: 'No results' message is visible. Returning empty list."
+                )
+                # No need to proceed further, return empty list
+            else:
+                # "No results" not visible, proceed to find and process issue rows
+                logger.info(
+                    "BrowserChecker: 'No results' not visible, checking for issue rows within UL..."
+                )
+                # Locate issue rows *within* the UL
+                issue_rows = list_ul_locator.locator(self._ISSUE_ROW_SELECTOR)
+                count = issue_rows.count()
+                logger.info(
+                    f"BrowserChecker: Found {count} issue row(s) within the list UL."
+                )
+
+                if count > 0:
+                    for i in range(count):
+                        row = issue_rows.nth(i)
+                    link_element = row.locator(self._ISSUE_LINK_SELECTOR).first
+                    href = link_element.get_attribute("href")
+                    if href:
+                        match = self._ISSUE_ID_RE.search(href)
+                        if match:
+                            try:
+                                issue_num = int(match.group(1))
+                                # Add any issue number found by the query
+                                verified_numbers.append(issue_num)
+                            except (ValueError, IndexError):
+                                logger.warning(
+                                    f"Could not parse issue number from href: {href}"
+                                )
+                        else:
+                            logger.warning(
+                                f"Could not find issue number pattern in href: {href}"
+                            )
+                    else:
+                        logger.warning(
+                            f"Issue link element found in row {i} but has no href attribute."
+                        )
+
+            logger.info(
+                f"BrowserChecker: Verified issue numbers with no linked PRs: {verified_numbers}"
+            )
+
+        except PlaywrightTimeoutError:
+            logger.error(
+                f"BrowserChecker: Timeout error during PR verification for {repo_full_name}."
+            )
+        except PlaywrightError as pe:
+            logger.error(
+                f"BrowserChecker: Playwright error during PR verification for {repo_full_name}: {pe}"
+            )
+        except Exception as e:
+            logger.exception(
+                f"BrowserChecker: Unexpected error during PR verification for {repo_full_name}: {e}"
+            )
+        finally:
+            if page:
+                try:
+                    page.close()
+                except Exception as e:
+                    logger.warning(
+                        f"BrowserChecker: Error closing page after PR verification: {e}"
+                    )
+            time.sleep(self.check_delay)  # Keep delay
+
+        return verified_numbers
+
     def scrape_readme_text(self, repo_url: str) -> Optional[str]:
         """
         Navigates to the repository URL and scrapes the text content of the README.
@@ -508,11 +681,11 @@ class BrowserIssueChecker:
         readme_selector = "article.markdown-body"  # Selector for the README content
 
         try:
-            logger.info(f"BrowserChecker: Getting new page for README: {repo_url}...")
+            logger.info(f"BrowserChecker: Getting new page for README: {repo_url}")
             page = self._get_new_page()
-            logger.info(f"BrowserChecker: Navigating to {repo_url}...")
+            logger.info(f"BrowserChecker: Navigating to README: {repo_url}")
             page.goto(repo_url, wait_until="domcontentloaded", timeout=self.timeout)
-            logger.info("BrowserChecker: Navigation successful.")
+            logger.info("BrowserChecker: README Navigation successful.")
 
             logger.info(
                 f"BrowserChecker: Waiting for README selector: '{readme_selector}'..."

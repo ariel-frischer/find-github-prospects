@@ -15,6 +15,9 @@ VENV_RUN := bash -c 'source .venv/bin/activate && PYTHONPATH=. exec "$$@"' --
 test:
 	$(VENV_RUN) pytest tests/
 
+# Run fix and test sequentially
+all: fix test
+
 # Install Playwright browser binaries (run after install-dev)
 install-browsers:
 	@echo "Ensuring Playwright browsers are installed using venv's playwright..."
@@ -95,4 +98,16 @@ filter-prs:
 	fi
 	$(VENV_RUN) python scripts/filter_issues_by_prs.py "$(FILE)"
 
-.PHONY: install-dev fix test install-browsers run run-browser update-cache aider aider-test enrich review post-process filter-prs
+# Test browser search directly on a repo/URL
+# Usage: make test-url-search REPO="owner/repo" [ARGS="--label bug --max-linked-prs 0"]
+# Usage: make test-url-search REPO="https://github.com/owner/repo/issues?q=..." [ARGS="..."]
+test-url-search:
+	@echo "Running direct browser search test on: $(REPO)"
+	@if [ -z "$(REPO)" ]; then \
+		echo "[Error] REPO argument must be set. Example:"; \
+		echo "make test-url-search REPO=\"owner/repo\""; \
+		exit 1; \
+	fi
+	$(VENV_RUN) repobird-leadgen test-url-search "$(REPO)" $(ARGS)
+
+.PHONY: install-dev fix test all install-browsers run run-browser update-cache aider aider-test enrich review post-process filter-prs test-url-search

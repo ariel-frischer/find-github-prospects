@@ -79,12 +79,22 @@ Finds repositories matching your criteria and saves the raw data to a JSON cache
         *   **How it works:** The `search` command saves the raw JSON data for each repository that meets *all* specified criteria (including label, age, PR filters) to this file, one JSON object per line.
         *   **Incremental & Skipping:** If the specified cache file already exists, the command first reads it to identify repositories that have already been processed and saved. It then skips checking these repositories again during the current search. Any *new* qualifying repositories found are appended to the existing file. This prevents duplicate entries and saves API calls on subsequent runs with the same cache file.
         *   **Default Naming:** If `--cache-file` is not provided, a filename is automatically generated based on the search parameters (label, language, stars, days, age, prs) and placed in the `cache/` directory (e.g., `cache/raw_repos_label_good_first_issue_lang_python_stars_20_days_365_age_30_prs_0.jsonl`).
-    *   `--max-issue-age-days` INTEGER: Only find repos where at least one matching issue was created within this many days (optional).
-    *   `--max-linked-prs` INTEGER: [Search Phase] Only find repos where at least one matching issue has this many or fewer linked pull requests (optional).
-    *   `--use-browser-checker`: [Search Phase] Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.
-*   **Example with detailed filters:** Find Python repos with "good first issue" issues created in the last 30 days that have 0 linked PRs, saving to a specific cache file:
+    *   `--max-issue-age-days` INTEGER: [Filter] Only find repos where at least one matching issue was created within this many days (optional).
+    *   `--max-linked-prs` INTEGER: [Filter] Only find repos where at least one matching issue has this many or fewer linked pull requests (optional). Uses API checks by default.
+    *   `--use-browser-checker`: [Filter] Use Playwright browser automation for certain checks. The behavior depends on whether detailed filters (`--max-issue-age-days`, `--max-linked-prs`) are active:
+        *   **No Detailed Filters:** If neither `--max-issue-age-days` nor `--max-linked-prs` is specified, using `--use-browser-checker` makes the tool perform the *initial* check for issues matching the `--label` by scraping the GitHub issues page directly, instead of using the GitHub API's `search_issues`. This can sometimes find issues the API might miss but is slower.
+        *   **Detailed Filters Active (Hybrid Approach):** When `--max-issue-age-days` and/or `--max-linked-prs` are specified along with `--use-browser-checker`:
+            1.  The GitHub API is *always* used for the initial repository search (finding repos matching language, stars, activity).
+            2.  The API is *always* used to find *candidate* issues within those repos that match the `--label` and the `--max-issue-age-days` filter.
+            3.  **If `--max-linked-prs 0` is specified:** The browser checker then takes the list of candidate issues (that passed the age filter) and verifies which ones *actually* have zero linked PRs by performing a specific search query directly on the GitHub issues UI (`.../issues?q=... -linked:pr ...`). This UI check is often more accurate for the zero-PR case than the API's timeline events. Only issues confirmed by the browser to have zero PRs are considered qualified.
+            4.  **If `--max-linked-prs N` (where N > 0) is specified:** The browser checker is *not* currently used for the PR check. The API's timeline event check is used to count linked PRs for the candidate issues (similar to the default behavior without `--use-browser-checker`).
+*   **Example with detailed filters (API default):** Find Python repos with "good first issue" issues created in the last 30 days that have 0 linked PRs, saving to a specific cache file:
     ```bash
     repobird-leadgen search --label "good first issue" --language python --max-issue-age-days 30 --max-linked-prs 0 --cache-file cache/my_search_results.jsonl
+    ```
+*   **Example with hybrid browser check for zero PRs:** Find Python repos with "good first issue" issues created in the last 30 days, using the browser to verify which ones have exactly 0 linked PRs:
+    ```bash
+    repobird-leadgen search --label "good first issue" --language python --max-issue-age-days 30 --max-linked-prs 0 --use-browser-checker --cache-file cache/my_search_results_hybrid.jsonl
     ```
 
 **2. `enrich`**
@@ -140,7 +150,7 @@ Runs the `search` and `enrich` steps sequentially. It uses a temporary cache fil
     *   `--recent-days` / `-d` INTEGER (default: 365) [Search Phase]
     *   `--max-issue-age-days` INTEGER (optional) [Search Phase]
     *   `--max-linked-prs` INTEGER (optional) [Search Phase]
-    *   `--use-browser-checker`: [Search Phase] Use browser automation for issue checks.
+    *   `--use-browser-checker`: [Search Phase] Use browser automation (see `search` help for details on hybrid approach).
     *   `--output-dir` / `-o` PATH (default: "output") [Enrich Phase] Directory for final enriched JSONL file.
     *   `--concurrency` / `-w` INTEGER (default: 20) [Enrich Phase] Parallel workers for scraping/analysis.
     *   `--keep-cache`: Keep the intermediate raw repository cache file from the search step.

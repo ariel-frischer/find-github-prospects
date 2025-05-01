@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json  # For saving raw data incrementally
+
+# from rich.console import Console # Remove Console import
+import logging  # Import logging
 import random  # For jitter
 import time
 from datetime import datetime, timedelta, timezone
@@ -24,8 +27,6 @@ from github import (
 )
 from github.Issue import Issue
 from github.Repository import Repository
-# from rich.console import Console # Remove Console import
-import logging # Import logging
 from tqdm import tqdm
 
 # Import the new browser checker
@@ -89,9 +90,7 @@ class GitHubSearcher:
             )
             return
 
-        logger.info(
-            f"Loading issue cache from: {self.issue_cache_path}"
-        )
+        logger.info(f"Loading issue cache from: {self.issue_cache_path}")
         count = 0
         try:
             with self.issue_cache_path.open("r", encoding="utf-8") as f:
@@ -125,9 +124,7 @@ class GitHubSearcher:
                         )
             logger.info(f"Loaded {count} entries into issue cache.")
         except Exception as e:
-            logger.error(
-                f"Error loading issue cache file {self.issue_cache_path}: {e}"
-            )
+            logger.error(f"Error loading issue cache file {self.issue_cache_path}: {e}")
             self.issue_cache = {}  # Start fresh if loading fails
 
     def _append_to_issue_cache(
@@ -266,17 +263,18 @@ class GitHubSearcher:
         repo: Repository,
         label: str,
         max_issue_age_days: Optional[int],
-        max_linked_prs: Optional[int],
+        # max_linked_prs: Optional[int], # Removed PR filter from this function's responsibility
     ) -> List[Dict[str, Any]]:
         """
         Fetches open issues with the label and returns details (number, url) of those
-        that satisfy the age/PR criteria (up to a limit).
+        that satisfy the age criteria (up to a limit).
+        PR filtering is handled separately in the main search loop.
         Returns a list of dictionaries, each containing 'number' and 'html_url'.
         """
-        qualifying_issues_details: List[Dict[str, Any]] = []
+        candidate_issues_details: List[Dict[str, Any]] = []  # Renamed variable
         try:
             logger.info(
-                f"Performing detailed check: Repo {repo.full_name}, Label '{label}', Max Age: {max_issue_age_days}, Max PRs: {max_linked_prs}"
+                f"Performing detailed check (Age Filter Only): Repo {repo.full_name} ({repo.html_url}), Label '{label}', Max Age: {max_issue_age_days}"
             )
             # Fetch issues with the label using the API (wrapped in retry)
             issues_paginator = self._execute_with_retry(
@@ -299,7 +297,7 @@ class GitHubSearcher:
             # Iterate through issues, checking criteria
             # Limit iteration to avoid excessive API calls if many issues exist
             issues_checked = 0
-            max_issues_to_check = 30  # Configurable? Maybe later.
+            max_issues_to_check = 300  # Configurable? Maybe later.
 
             # --- Add tqdm progress bar for issue checking ---
             total_issues_with_label = issues_paginator.totalCount
@@ -343,42 +341,21 @@ class GitHubSearcher:
                             issue_pbar.update(1)  # Advance progress bar
                             continue  # Skip to next issue
 
-                    # 2. Check Linked PRs (only if age is okay or not checked)
-                    if max_linked_prs is not None:
-                        logger.debug(
-                            f"Checking linked PRs for issue: {issue.html_url}..."
-                        )  # Use debug
-                        pr_count = self._get_linked_prs_count(issue)
-                        if pr_count == -1:
-                            logger.warning(
-                                f"Failed to get PR count for issue {issue.html_url}. Skipping issue."
-                            )
-                            issue_pbar.update(1)  # Advance progress bar
-                            continue  # Skip issue if PR count failed
-                        if pr_count > max_linked_prs:
-                            logger.info(
-                                f"Issue {issue.html_url} has too many linked PRs ({pr_count} > {max_linked_prs}). Skipping."
-                            )
-                            issue_pbar.update(1)  # Advance progress bar
-                            continue  # Skip to next issue
-                        else:
-                            logger.info(
-                                f"Issue {issue.html_url} has {pr_count} linked PRs (<= {max_linked_prs}). OK."
-                            )
+                    # 2. PR Check Removed: This is now handled after this function returns.
 
-                    # If we reach here, the issue satisfies all active criteria
-                    logger.info(f"Issue {issue.html_url} qualifies!")
-                    qualifying_issues_details.append(
+                    # If we reach here, the issue satisfies the age criteria (if applied)
+                    logger.info(f"Issue {issue.html_url} meets age criteria.")
+                    candidate_issues_details.append(
                         {"number": issue.number, "html_url": issue.html_url}
                     )
                     issue_pbar.update(1)  # Advance progress bar
                     # Continue checking other issues up to the limit
 
-            # If loop finishes, return the list of details found
+            # If loop finishes, return the list of candidate details found
             logger.info(
-                f"Found {len(qualifying_issues_details)} qualifying issues among the first {issues_checked} checked for {repo.full_name} with label '{label}'."
+                f"Found {len(candidate_issues_details)} candidate issues (meeting age criteria) among the first {issues_checked} checked for {repo.full_name} with label '{label}'."
             )
-            return qualifying_issues_details
+            return candidate_issues_details  # Return candidates
 
         except RuntimeError as e:
             logger.error(
@@ -595,14 +572,20 @@ class GitHubSearcher:
         )
 
         cache_file.parent.mkdir(parents=True, exist_ok=True)
-        # Only initialize browser checker if needed and not overridden by detailed filters
+        # Initialize browser checker if the flag is set
         checker_context = None
-        if self.use_browser_checker and not detailed_filters_active:
-            checker_context = BrowserIssueChecker()
+        browser_checker_instance = (
+            None  # Keep track of the instance for context management
+        )
+        if self.use_browser_checker:
+            logger.info("Browser checker requested, initializing...")
+            browser_checker_instance = BrowserIssueChecker()
+            checker_context = (
+                browser_checker_instance.__enter__()
+            )  # Enter context immediately
 
         try:
-            if checker_context:
-                checker_context.__enter__()
+            # No need to enter context again here
 
             paginated_list = self._execute_with_retry(
                 self.gh.search_repositories,
@@ -612,9 +595,7 @@ class GitHubSearcher:
             )
 
             if not paginated_list:
-                logger.error(
-                    "Initial repository search failed after multiple retries."
-                )
+                logger.error("Initial repository search failed after multiple retries.")
                 return
 
             logger.info(
@@ -652,142 +633,313 @@ class GitHubSearcher:
 
                         # --- Qualification Logic --- START
                         repo_qualifies = False
-                        # Will store list of dicts: {'number': int, 'html_url': str}
-                        found_issues_list: List[Dict[str, Any]] = []
-                        issue_details_for_cache: List[
+                        found_issues_list: List[
                             Dict[str, Any]
-                        ] = []  # For internal issue cache only (basic check path)
+                        ] = []  # Final list of qualifying issues for this repo
 
                         if detailed_filters_active:
-                            # --- Detailed Filter Path ---
+                            # --- Detailed Filter Path (API Age Check -> Optional PR Check) ---
                             pbar.set_postfix_str(
-                                f"Detailed check {repo_full_name}", refresh=True
+                                f"API Age check {repo_full_name}", refresh=True
                             )
                             detailed_check_count += 1
-                            # Call the modified function which returns a list of issue detail dicts
-                            qualifying_issues_details = self._find_qualifying_issues(
-                                repo, label, max_issue_age_days, max_linked_prs
+                            # 1. Find candidates based on AGE filter only
+                            candidate_issues = self._find_qualifying_issues(
+                                repo,
+                                label,
+                                max_issue_age_days,  # Pass only age filter
                             )
-                            repo_qualifies = bool(
-                                qualifying_issues_details
-                            )  # Qualifies if list is not empty
-                            found_issues_list = (
-                                qualifying_issues_details  # Store the list of dicts
-                            )
-                            # Note: We don't use or update the `issue_cache` here.
+
+                            if not candidate_issues:
+                                logger.info(
+                                    f"Repo {repo_full_name} skipped (no issues met age criteria)."
+                                )
+                                repo_qualifies = False
+                            elif max_linked_prs == 0:
+                                # 2a. Handle max_linked_prs == 0 (API or Browser)
+                                candidate_numbers = [
+                                    item["number"]
+                                    for item in candidate_issues
+                                    if item.get("number")
+                                ]
+                                if not candidate_numbers:
+                                    logger.warning(
+                                        f"Repo {repo_full_name}: Age check found candidates, but failed to extract numbers."
+                                    )
+                                    repo_qualifies = False  # Treat as non-qualifying if numbers missing
+                                elif self.use_browser_checker and checker_context:
+                                    # --- Hybrid Browser PR Check ---
+                                    pbar.set_postfix_str(
+                                        f"Browser PR check {repo_full_name}",
+                                        refresh=True,
+                                    )
+                                    # Pass the label and age to the browser verification function
+                                    verified_numbers = (
+                                        checker_context.verify_issues_no_prs(
+                                            repo_full_name,
+                                            label,  # Pass label
+                                            max_issue_age_days,  # Pass age filter
+                                        )
+                                    )
+                                    # Use the verified numbers directly to construct the final list
+                                    found_issues_list = [
+                                        {
+                                            "number": num,
+                                            "html_url": f"{repo.html_url}/issues/{num}",
+                                        }
+                                        for num in verified_numbers
+                                    ]
+                                    repo_qualifies = bool(found_issues_list)
+                                    if repo_qualifies:
+                                        # Log the qualifying repo and the specific issue URLs found
+                                        issue_urls_str = ", ".join(
+                                            [
+                                                f"#{item['number']} ({item['html_url']})"
+                                                for item in found_issues_list
+                                            ]
+                                        )
+                                        logger.info(
+                                            f"Repo {repo_full_name} qualifies (Browser PR Check): Found {len(found_issues_list)} issues: {issue_urls_str}"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"Repo {repo_full_name} skipped: Browser verification found no issues with 0 linked PRs among candidates."
+                                        )
+                                else:
+                                    # --- API PR Check (max_linked_prs == 0) ---
+                                    pbar.set_postfix_str(
+                                        f"API PR check {repo_full_name}", refresh=True
+                                    )
+                                    final_issues_for_repo = []
+                                    issues_processed_for_prs = 0
+                                    with tqdm(
+                                        total=len(candidate_issues),
+                                        desc="  Checking PRs (API)",
+                                        leave=False,
+                                    ) as pr_pbar:
+                                        for issue_detail in candidate_issues:
+                                            issue_num = issue_detail.get("number")
+                                            if not issue_num:
+                                                continue  # Should not happen if _find_qualifying_issues worked
+
+                                            # Need to get the Issue object to check timeline
+                                            try:
+                                                issue_obj = self._execute_with_retry(
+                                                    repo.get_issue, number=issue_num
+                                                )
+                                                if not issue_obj:
+                                                    raise UnknownObjectException(
+                                                        404, "Not Found", {}
+                                                    )  # Treat retry failure as not found
+
+                                                pr_count = self._get_linked_prs_count(
+                                                    issue_obj
+                                                )
+                                                issues_processed_for_prs += 1
+                                                pr_pbar.update(1)
+                                                if pr_count == 0:
+                                                    logger.info(
+                                                        f"Issue #{issue_num} kept (0 linked PRs)."
+                                                    )
+                                                    final_issues_for_repo.append(
+                                                        issue_detail
+                                                    )
+                                                elif pr_count > 0:
+                                                    logger.info(
+                                                        f"Issue #{issue_num} skipped ({pr_count} linked PRs)."
+                                                    )
+                                                else:  # pr_count == -1 (error)
+                                                    logger.warning(
+                                                        f"Issue #{issue_num} skipped (error checking PRs)."
+                                                    )
+
+                                            except (
+                                                GithubException,
+                                                RuntimeError,
+                                                UnknownObjectException,
+                                            ) as e:
+                                                logger.warning(
+                                                    f"Skipping PR check for issue #{issue_num} due to API error: {e}"
+                                                )
+                                                pr_pbar.update(
+                                                    1
+                                                )  # Still advance progress
+                                                continue  # Skip this issue if we can't check its PRs
+
+                                    found_issues_list = final_issues_for_repo
+                                    repo_qualifies = bool(found_issues_list)
+                                    if repo_qualifies:
+                                        logger.info(
+                                            f"Repo {repo_full_name} qualifies: Found {len(found_issues_list)} issues meeting age and 0-PR criteria via API."
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"Repo {repo_full_name} skipped: API check found no issues with 0 linked PRs among candidates."
+                                        )
+
+                            elif (
+                                max_linked_prs is not None
+                            ):  # Handle max_linked_prs > 0
+                                # 2b. API PR Check (max_linked_prs > 0)
+                                pbar.set_postfix_str(
+                                    f"API PR check {repo_full_name}", refresh=True
+                                )
+                                final_issues_for_repo = []
+                                with tqdm(
+                                    total=len(candidate_issues),
+                                    desc="  Checking PRs (API)",
+                                    leave=False,
+                                ) as pr_pbar:
+                                    for issue_detail in candidate_issues:
+                                        issue_num = issue_detail.get("number")
+                                        if not issue_num:
+                                            continue
+
+                                        try:
+                                            issue_obj = self._execute_with_retry(
+                                                repo.get_issue, number=issue_num
+                                            )
+                                            if not issue_obj:
+                                                raise UnknownObjectException(
+                                                    404, "Not Found", {}
+                                                )
+
+                                            pr_count = self._get_linked_prs_count(
+                                                issue_obj
+                                            )
+                                            pr_pbar.update(1)
+                                            if (
+                                                pr_count != -1
+                                                and pr_count <= max_linked_prs
+                                            ):
+                                                logger.info(
+                                                    f"Issue #{issue_num} kept ({pr_count} <= {max_linked_prs} linked PRs)."
+                                                )
+                                                final_issues_for_repo.append(
+                                                    issue_detail
+                                                )
+                                            elif pr_count > max_linked_prs:
+                                                logger.info(
+                                                    f"Issue #{issue_num} skipped ({pr_count} > {max_linked_prs} linked PRs)."
+                                                )
+                                            else:  # pr_count == -1 (error)
+                                                logger.warning(
+                                                    f"Issue #{issue_num} skipped (error checking PRs)."
+                                                )
+
+                                        except (
+                                            GithubException,
+                                            RuntimeError,
+                                            UnknownObjectException,
+                                        ) as e:
+                                            logger.warning(
+                                                f"Skipping PR check for issue #{issue_num} due to API error: {e}"
+                                            )
+                                            pr_pbar.update(1)
+                                            continue
+
+                                found_issues_list = final_issues_for_repo
+                                repo_qualifies = bool(found_issues_list)
+                                if repo_qualifies:
+                                    logger.info(
+                                        f"Repo {repo_full_name} qualifies: Found {len(found_issues_list)} issues meeting age and PR criteria (<= {max_linked_prs}) via API."
+                                    )
+                                else:
+                                    logger.info(
+                                        f"Repo {repo_full_name} skipped: API check found no issues meeting PR criteria (<= {max_linked_prs}) among candidates."
+                                    )
+
+                            else:
+                                # 2c. No PR filter applied, candidates from age check are final
+                                found_issues_list = candidate_issues
+                                repo_qualifies = True  # Qualifies if candidates exist
+                                logger.info(
+                                    f"Repo {repo_full_name} qualifies: Found {len(found_issues_list)} issues meeting age criteria (no PR filter)."
+                                )
 
                         else:
-                            # --- Basic Filter Path ---
-                            cache_key = (repo_full_name, label)
-                            has_label_initially = False
+                            # --- Basic Filter Path (No detailed filters) ---
+                            # This path uses either Browser Checker OR basic API check + cache
+                            if self.use_browser_checker and checker_context:
+                                # --- Basic Browser Check ---
+                                pbar.set_postfix_str(
+                                    f"Browser check {repo_full_name}", refresh=True
+                                )
+                                try:
+                                    # Browser checker handles label check internally, pass age filter
+                                    repo_qualifies, browser_issue_details = (
+                                        checker_context.check_repo_for_issue_label(
+                                            repo_full_name,
+                                            label,
+                                            None,  # No PR filter needed here, handled by query if max_linked_prs=0
+                                            max_issue_age_days,  # Pass age filter
+                                        )
+                                    )
+                                    found_issues_list = [
+                                        {
+                                            "number": detail.get("number"),
+                                            "html_url": f"{repo.html_url}/issues/{detail.get('number')}"
+                                            if detail.get("number")
+                                            else None,
+                                        }
+                                        for detail in browser_issue_details
+                                        if detail.get("number") is not None
+                                    ]
+                                except Exception as browser_err:
+                                    logger.error(
+                                        f"Error during browser check for {repo_full_name}: {browser_err}. Skipping repo."
+                                    )
+                                    continue
+                            else:
+                                # --- Basic API Check + Cache ---
+                                cache_key = (repo_full_name, label)
+                            issue_details_for_cache: List[Dict[str, Any]] = []
 
                             if cache_key in self.issue_cache:
-                                # Use cached basic label existence result
-                                has_label_initially, issue_details_for_cache = (
+                                repo_qualifies, issue_details_for_cache = (
                                     self.issue_cache[cache_key]
                                 )
-                                # Set repo_qualifies based on the cached value
-                                repo_qualifies = has_label_initially
                                 logger.info(
                                     f"Cache Hit: Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}"
                                 )
                             else:
-                                # Cache Miss - Perform live basic label check
                                 logger.info(
-                                    f"Cache Miss: Checking {repo_full_name} for '{label}'..."
+                                    f"Cache Miss: API Checking {repo_full_name} for '{label}'..."
                                 )
-                                check_result: Optional[
-                                    Tuple[bool, List[Dict[str, Any]]]
-                                ] = None
-
-                                if self.use_browser_checker and checker_context:
-                                    try:
-                                        # Pass max_linked_prs to the browser checker
-                                        check_result = (
-                                            checker_context.check_repo_for_issue_label(
-                                                repo_full_name, label, max_linked_prs
-                                            )
-                                        )
-                                    except Exception as browser_err:
-                                        logger.error(
-                                            f"Error during browser check for {repo_full_name}: {browser_err}. Skipping repo."
-                                        )
-                                        continue  # Skip to next repo
-                                else:
-                                    # API check (returns only boolean)
-                                    try:
-                                        (
-                                            api_has_label,
-                                            api_issue_details,
-                                        ) = (  # Capture details
-                                            self._has_open_issue_with_label_api(
-                                                repo, label
-                                            )
-                                        )
-                                        # API check now returns details
-                                        check_result = (
-                                            api_has_label,
-                                            api_issue_details,
-                                        )
-                                    except Exception as api_err:
-                                        logger.error(
-                                            f"Error during API label check for {repo_full_name}: {api_err}. Skipping repo."
-                                        )
-                                        continue  # Skip to next repo
-
-                                # Update internal issue cache with the result of the live check
-                                if check_result is not None:
-                                    has_label_initially, issue_details_from_check = (
-                                        check_result
+                                try:
+                                    repo_qualifies, issue_details_for_cache = (
+                                        self._has_open_issue_with_label_api(repo, label)
                                     )
-                                    # Store result in memory cache
-                                    self.issue_cache[cache_key] = (
-                                        has_label_initially,
-                                        issue_details_from_check,  # Store details in internal cache
-                                    )
-                                    # Append result to file cache
-                                    self._append_to_issue_cache(
-                                        repo_full_name,
-                                        label,
-                                        has_label_initially,
-                                        issue_details_from_check,  # Write details to internal cache file
-                                        repo.html_url,
-                                    )
-                                    # Use the result from the check
-                                    issue_details_for_cache = issue_details_from_check
-                                    repo_qualifies = has_label_initially
-
-                                    # Update internal memory cache ONLY (already appended to file above)
                                     self.issue_cache[cache_key] = (
                                         repo_qualifies,
                                         issue_details_for_cache,
                                     )
-                                    # REMOVED duplicate call to self._append_to_issue_cache here
-                                    logger.info(
-                                        f"Check Done: Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}. Cached."
+                                    self._append_to_issue_cache(
+                                        repo_full_name,
+                                        label,
+                                        repo_qualifies,
+                                        issue_details_for_cache,
+                                        repo.html_url,
                                     )
-                                else:
-                                    # Check failed, cannot determine label presence
-                                    logger.warning(
-                                        f"Check Failed: Skipping {repo_full_name}."
+                                    logger.info(
+                                        f"API Check Done: Repo: {repo_full_name}, Label: '{label}', Has Label: {repo_qualifies}. Cached."
+                                    )
+                                except Exception as api_err:
+                                    logger.error(
+                                        f"Error during API label check for {repo_full_name}: {api_err}. Skipping repo."
                                     )
                                     continue  # Skip to next repo
 
-                            # Determine issue details list from the potentially filtered details
-                            # In the basic path, issue_details_for_cache might contain number, title, desc, url
-                            # We primarily need number and url for found_issues_list
+                            # Extract number and URL for found_issues_list from the basic check details
                             found_issues_list = [
                                 {
                                     "number": item.get("number"),
-                                    "html_url": item.get(
-                                        "html_url"
-                                    ),  # Try to get URL from cache details
+                                    "html_url": item.get("html_url"),
                                 }
                                 for item in issue_details_for_cache
                                 if isinstance(item, dict)
                                 and item.get("number") is not None
                             ]
-                            # Qualification (repo_qualifies) is already set based on has_label_initially
 
                         # --- Qualification Logic --- END
 
@@ -798,8 +950,9 @@ class GitHubSearcher:
                             pbar.update(1)
                             pbar.set_postfix_str("Found qualified", refresh=False)
                             # Log qualification info
-                            logger.info(f"Qualified: {repo.full_name}")
-                            logger.info(f"  Repo URL: {repo.html_url}")
+                            logger.info(
+                                f"Qualified: {repo.full_name} ({repo.html_url})"
+                            )
                             logger.info("  Found Issues:")
                             for issue_detail in found_issues_list:
                                 issue_num = issue_detail.get("number")
@@ -807,8 +960,8 @@ class GitHubSearcher:
                                 # Construct URL if missing (e.g., from basic API check path)
                                 if not issue_url and issue_num:
                                     issue_url = f"{repo.html_url}/issues/{issue_num}"
-                                logger.info(f"    - #{issue_num}: {issue_url}")
-                            logger.info(f"  ({found_count}/{max_results})")
+                                logger.info(f"    - Issue #{issue_num}: {issue_url}")
+                            logger.info(f"  (Count: {found_count}/{max_results})")
 
                             # Save raw data to the main cache file
                             # Add the list of found issue details (number and URL)
@@ -850,9 +1003,7 @@ class GitHubSearcher:
                             # No need for else log, basic filter path logs its own messages
 
                     except StopIteration:
-                        logger.info(
-                            "Reached end of GitHub repository search results."
-                        )
+                        logger.info("Reached end of GitHub repository search results.")
                         break
                     except (RuntimeError, GithubException, UnknownObjectException) as e:
                         logger.warning(
@@ -922,5 +1073,7 @@ class GitHubSearcher:
             # traceback.print_exc() # logger.exception includes traceback
             raise
         finally:
-            if checker_context:
-                checker_context.__exit__(None, None, None)
+            # Exit browser context if it was initialized
+            if browser_checker_instance:
+                logger.info("Shutting down browser checker...")
+                browser_checker_instance.__exit__(None, None, None)

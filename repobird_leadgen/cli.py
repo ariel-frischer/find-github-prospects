@@ -1,9 +1,9 @@
 import json
+import logging  # Import logging
 import os  # Needed for permission checks
+import re  # Add re import for URL parsing
 import shutil
 import tempfile
-import logging  # Import logging
-import traceback
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -11,10 +11,12 @@ from typing import Any, Dict, List, Optional, Set
 
 import typer
 
+# Import BrowserIssueChecker for the new command
+from .browser_checker import BrowserIssueChecker
+
 # Remove unused GitHub specific imports if not needed for rehydration anymore
 # from github import GithubException, RateLimitExceededException, Repository
 # from rich import print # Remove direct print import
-
 from .config import CACHE_DIR, CONCURRENCY, OUTPUT_DIR
 
 # Remove ContactScraper import
@@ -52,7 +54,7 @@ def main_callback(
         return
 
     # level = getattr(logging, log_level.upper(), logging.INFO)
-    level = logging.INFO # Keep it simple for now
+    level = logging.INFO  # Keep it simple for now
     command_name = ctx.invoked_subcommand or "main"
     setup_logging(command_name, level)
 
@@ -150,7 +152,7 @@ def search(
     use_browser_checker: bool = typer.Option(
         False,
         "--use-browser-checker",
-        help="[Search Phase] Use Playwright browser automation (slower, less reliable) instead of API calls to check for issue labels.",
+        help="[Search Phase] Use Playwright browser automation. If detailed filters (--max-issue-age-days or --max-linked-prs) are used, this enables a hybrid approach: API for age filtering, browser for verifying '--max-linked-prs 0'. Otherwise, uses browser for initial label check.",
         is_flag=True,
     ),
 ) -> Optional[Path]:
@@ -357,7 +359,9 @@ def enrich(
             raise typer.Exit()
 
         # Process repositories in parallel, saving incrementally
-        logger.info(f"Starting parallel enrichment for {len(repo_data_list)} repositories...")
+        logger.info(
+            f"Starting parallel enrichment for {len(repo_data_list)} repositories..."
+        )
         parallel_map_and_save(
             fn=enrich_repo_entry,
             items=repo_data_list,
@@ -374,9 +378,7 @@ def enrich(
         logger.info(f"  Results written incrementally to: {output_file}")
         # We could enhance the writer process to count errors/successes if a detailed summary is critical.
 
-        logger.info(
-            f"Enrichment process completed. Results saved to {output_file}"
-        )
+        logger.info(f"Enrichment process completed. Results saved to {output_file}")
         return output_file  # Return path for chaining
 
     except FileNotFoundError:
@@ -443,7 +445,7 @@ def full_pipeline(
     use_browser_checker: bool = typer.Option(
         False,
         "--use-browser-checker",
-        help="[Search Phase] Use Playwright browser automation for issue label checks.",
+        help="[Search Phase] Use Playwright browser automation (see `search` help for details on hybrid approach).",
         is_flag=True,
     ),
     keep_cache: bool = typer.Option(
@@ -766,7 +768,8 @@ def review(
                         print(
                             f"  Reviewing Issue {issue_index}/{issues_in_repo_count}: [bold magenta]#{issue_number}[/]"
                         )
-                        print(f"  URL: {issue_url}")
+                        # Use logger for URL, print for interaction
+                        logger.info(f"  Issue URL: {issue_url}")
 
                         if auto_open:
                             try:
@@ -788,7 +791,7 @@ def review(
                                 break  # Exit the inner loop if action is not 'o'
 
                             # Handle 'o' action: open URL and re-prompt
-                            logger.info(f"Opening URL: {issue_url}")
+                            logger.info(f"Opening URL in browser: {issue_url}")
                             try:
                                 webbrowser.open(issue_url)
                             except Exception as wb_err:
@@ -854,9 +857,7 @@ def review(
                             # Raise typer.Exit - the finally block will handle saving
                             raise typer.Exit(code=0)  # Use code 0 for clean quit
                         else:
-                            logger.warning(
-                                "Invalid action. Treating as Skip Issue."
-                            )
+                            logger.warning("Invalid action. Treating as Skip Issue.")
                             issues_skipped_count += 1
                             # Move to next issue
 
@@ -917,7 +918,9 @@ def review(
             logger.info(
                 f"  Repos newly marked as reviewed: {repos_marked_reviewed_this_session}"
             )
-            logger.info(f"  Total issues reviewed (approved/denied): {issues_reviewed_count}")
+            logger.info(
+                f"  Total issues reviewed (approved/denied): {issues_reviewed_count}"
+            )
             logger.info(f"  Issues denied: {issues_denied_count}")  # Updated label
             logger.info(f"  Issues skipped ('s' action): {issues_skipped_count}")
             logger.info(f"  Lines with errors: {error_count}")
@@ -1053,7 +1056,9 @@ def post_process(
                     logger.warning(f"Skipping line {repos_read} - Invalid JSON.")
                     errors_parsing += 1
                 except Exception as e:
-                    logger.error(f"Error processing line {repos_read}: {e}. Skipping line.")
+                    logger.error(
+                        f"Error processing line {repos_read}: {e}. Skipping line."
+                    )
                     errors_parsing += 1
 
         logger.info("--- Post-processing Summary ---")
@@ -1075,6 +1080,91 @@ def post_process(
                 logger.error(
                     f"Error removing incomplete output file {output_file}: {del_err}"
                 )
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def test_url_search(
+    repo_or_url: str = typer.Argument(
+        ...,
+        help="Repository name (e.g., 'owner/repo') or full GitHub issues URL to test.",
+    ),
+    label: str = typer.Option(
+        "good first issue",
+        "--label",
+        "-l",
+        help="Issue label to search for.",
+    ),
+    max_issue_age_days: Optional[int] = typer.Option(
+        None,
+        "--max-issue-age-days",
+        help="Filter issues created within N days.",
+    ),
+    max_linked_prs: Optional[int] = typer.Option(
+        None,
+        "--max-linked-prs",
+        help="Filter issues with at most N linked PRs (0 means exclude linked PRs).",
+    ),
+):
+    """
+    Test browser-based issue searching directly on a specific repository or URL.
+
+    Uses BrowserIssueChecker to navigate to the issues page with the specified
+    filters (label, age, linked PRs) and reports the found issues.
+    """
+    logger.info("Starting direct browser search test...")
+
+    # Extract repo_full_name from input
+    repo_full_name: Optional[str] = None
+    if "github.com" in repo_or_url:
+        # Try to extract from URL
+        match = re.search(r"github\.com/([^/]+/[^/]+)", repo_or_url)
+        if match:
+            repo_full_name = match.group(1)
+        else:
+            logger.error(f"Could not extract 'owner/repo' from URL: {repo_or_url}")
+            raise typer.Exit(code=1)
+    else:
+        # Assume it's already owner/repo format
+        if "/" not in repo_or_url or len(repo_or_url.split("/")) != 2:
+            logger.error(
+                f"Invalid repository format: '{repo_or_url}'. Use 'owner/repo'."
+            )
+            raise typer.Exit(code=1)
+        repo_full_name = repo_or_url
+
+    logger.info(f"  Target Repository: {repo_full_name}")
+    logger.info(f"  Label: '{label}'")
+    if max_issue_age_days is not None:
+        logger.info(f"  Max Issue Age: {max_issue_age_days} days")
+    if max_linked_prs is not None:
+        logger.info(f"  Max Linked PRs: {max_linked_prs}")
+    else:
+        logger.info("  Max Linked PRs: Not specified (no PR filter applied)")
+
+    try:
+        with BrowserIssueChecker(headless=True) as checker:  # Use context manager
+            logger.info("Browser checker initialized. Performing check...")
+            # Use check_repo_for_issue_label as it handles query construction
+            found_flag, issue_details = checker.check_repo_for_issue_label(
+                repo_full_name=repo_full_name,
+                label=label,
+                max_linked_prs=max_linked_prs,
+                max_issue_age_days=max_issue_age_days,
+            )
+
+            logger.info("--- Browser Search Test Results ---")
+            if found_flag:
+                logger.info(f"Found {len(issue_details)} issues matching criteria:")
+                for detail in issue_details:
+                    logger.info(
+                        f"  - #{detail.get('number')}: {detail.get('title', 'N/A')[:70]}..."
+                    )
+            else:
+                logger.info("No issues found matching the specified criteria.")
+
+    except Exception as e:
+        logger.exception(f"An error occurred during the browser search test: {e}")
         raise typer.Exit(code=1)
 
 
