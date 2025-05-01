@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import traceback
 from dataclasses import (
     dataclass,
@@ -22,6 +21,9 @@ from playwright.sync_api import (
 )
 from pydantic import ValidationError
 
+# Import configuration
+from .config import ENRICHER_LLM_MODEL
+
 # Removed URLExtract and Goose imports as they are now in url_processor
 # from urlextract import URLExtract
 # from goose3 import Goose
@@ -32,9 +34,8 @@ from .models import IssueAnalysis, LLMIssueAnalysisSchema
 from .url_processor import process_urls_for_issue
 
 # --- Configuration ---
-# Ensure OPENROUTER_API_KEY is set in your environment for LiteLLM
-# LLM_MODEL = os.getenv("LLM_MODEL", "openrouter/google/gemini-1.5-pro-preview-0409")
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-1.5-pro-preview-0409")
+# Ensure API keys (e.g., OPENROUTER_API_KEY, GOOGLE_API_KEY) are set in your environment for LiteLLM
+# LLM model is now configured via config.py (ENRICHER_LLM_MODEL)
 MAX_COMMENTS_FOR_LLM = 100  # Limit number of comments sent to LLM
 PLAYWRIGHT_TIMEOUT = 30000  # 30 seconds for page operations
 
@@ -50,8 +51,8 @@ class ScrapedIssueData:
     """Raw data scraped from a GitHub issue page."""
 
     title: Optional[str] = None
-    body: Optional[str] = None
-    comments: List[str] = field(default_factory=list)
+    body_html: Optional[str] = None  # Store body as HTML
+    comments_html: List[str] = field(default_factory=list)  # Store comments as HTML
     error: Optional[str] = None
 
 
@@ -171,15 +172,16 @@ class Enricher:
                 page.locator(body_container_selector).first.locator(body_selector).first
             )
             body_elem.wait_for(state="visible", timeout=self.timeout)
-            body = body_elem.text_content(timeout=self.timeout / 2) or ""
-            body = body.strip()
-            logging.info(f"    Body found: '{body[:50]}...'")
+            # Get inner HTML for body instead of text_content
+            body_html = body_elem.inner_html(timeout=self.timeout / 2) or ""
+            body_html = body_html.strip()
+            logging.info(f"    Body HTML found (length: {len(body_html)}).")
 
             # 3. Get comments (using updated selectors and logic)
             logging.info(
                 f"    Locating comment containers: '{comment_container_selector}'"
             )
-            comments = []
+            comments_html = []  # Store comment HTML
             # Locate all timeline elements
             timeline_elements = page.locator(comment_container_selector)
             timeline_count = timeline_elements.count()
@@ -200,15 +202,15 @@ class Enricher:
                     current_body_elem = timeline_element.locator(
                         comment_body_selector
                     ).first
+                    # Check if the HTML content matches the scraped body HTML
                     if current_body_elem.count() > 0:
-                        current_body_text = (
-                            current_body_elem.text_content(timeout=self.timeout / 4)
-                            or ""
+                        current_body_html = (
+                            current_body_elem.inner_html(timeout=self.timeout / 4) or ""
                         )
                         if (
-                            current_body_text.strip() == body
-                        ):  # Compare with the main body text we scraped
-                            if not comments:  # If we haven't added any comments yet, this is likely the main body
+                            current_body_html.strip() == body_html
+                        ):  # Compare with the main body HTML
+                            if not comments_html:  # If we haven't added any comments yet, this is likely the main body
                                 logging.info(
                                     f"    Skipping timeline element {i} (identified as main issue body)."
                                 )
@@ -216,25 +218,27 @@ class Enricher:
 
                 if not is_main_body:
                     # This is likely a comment, try to extract its body
+                    # Get inner HTML for comments
                     comment_body_elem = timeline_element.locator(
                         comment_body_selector
                     ).first
                     if comment_body_elem.count() > 0:
-                        text = (
-                            comment_body_elem.text_content(timeout=self.timeout / 2)
-                            or ""
+                        html_content = (
+                            comment_body_elem.inner_html(timeout=self.timeout / 2) or ""
                         )
-                        text = text.strip()
-                        if text:
+                        html_content = html_content.strip()
+                        if html_content:
                             logging.info(
-                                f"    Found comment in timeline element {i}: '{text[:50]}...'"
+                                f"    Found comment HTML in timeline element {i} (length: {len(html_content)})."
                             )
-                            comments.append(text)
+                            comments_html.append(html_content)
 
             logging.info(
-                f"    Scraped: Title='{title[:50]}...', Body='{body[:50]}...', Comments={len(comments)}"
+                f"    Scraped: Title='{title[:50]}...', Body HTML length={len(body_html)}, Comments HTML count={len(comments_html)}"
             )
-            return ScrapedIssueData(title=title, body=body, comments=comments)
+            return ScrapedIssueData(
+                title=title, body_html=body_html, comments_html=comments_html
+            )
 
         except Exception as e:
             error_msg = f"Error scraping {issue_url}: {e}\n{traceback.format_exc()}"
@@ -311,8 +315,8 @@ class Enricher:
     def _build_prompt(
         self,
         title: Optional[str],  # Allow None
-        body: Optional[str],  # Allow None
-        comments: List[str],
+        body_html: Optional[str],  # Changed from body
+        comments_html: List[str],  # Changed from comments
         url_summaries: List[Dict[str, str]],
         readme_text: Optional[str],  # Add readme_text parameter
     ) -> str:
@@ -320,10 +324,12 @@ class Enricher:
         if not title:  # Keep this check
             return ""  # Cannot analyze without a title
 
-        # Limit comments sent to LLM
-        comments_str = " || ".join(comments[:MAX_COMMENTS_FOR_LLM])
-        if len(comments) > MAX_COMMENTS_FOR_LLM:
-            comments_str += f" || ... (truncated, {len(comments) - MAX_COMMENTS_FOR_LLM} more comments)"
+        # Limit comments sent to LLM (using HTML comments now)
+        # Note: Sending raw HTML in comments might exceed token limits faster.
+        # Consider extracting text from HTML here if needed, or truncating more aggressively.
+        comments_str = " || ".join(comments_html[:MAX_COMMENTS_FOR_LLM])
+        if len(comments_html) > MAX_COMMENTS_FOR_LLM:
+            comments_str += f" || ... (truncated, {len(comments_html) - MAX_COMMENTS_FOR_LLM} more comments)"
 
         # Format URL Summaries
         url_summaries_text = "**Summaries of Linked URLs:**\n"
@@ -336,8 +342,18 @@ class Enricher:
             url_summaries_text += "No relevant external content was found or summarized from linked URLs.\n"
         url_summaries_text += "\n---\n"  # Separator
 
-        # Generate the schema with updated descriptions
-        schema_json = json.dumps(LLMIssueAnalysisSchema.model_json_schema(), indent=2)
+        # Generate the schema dynamically based on whether README exists
+        # Start with the base model schema
+        schema_dict = LLMIssueAnalysisSchema.model_json_schema()
+        # If no readme_text, remove the optional readme_summary field from the schema shown to the LLM
+        if not readme_text:
+            if "readme_summary" in schema_dict.get("properties", {}):
+                del schema_dict["properties"]["readme_summary"]
+            # Also remove from required list if it somehow ended up there (it shouldn't be)
+            if "readme_summary" in schema_dict.get("required", []):
+                schema_dict["required"].remove("readme_summary")
+
+        schema_json = json.dumps(schema_dict, indent=2)
 
         # Format README text
         readme_section = "<readme>\n"
@@ -351,8 +367,15 @@ class Enricher:
             readme_section += "README content could not be scraped or was empty."
         readme_section += "\n</readme>\n\n---\n"  # Separator
 
+        # Add conditional instruction for readme_summary
+        readme_summary_instruction = ""
+        if readme_text:
+            readme_summary_instruction = "\n- Include a concise `readme_summary` based *only* on the provided README content, focusing on project purpose and context relevant to the issue."
+        else:
+            readme_summary_instruction = "\n- **Do not** include the `readme_summary` field in your JSON output, as no README content was provided."
+
         prompt = f"""
-Analyze the following GitHub issue content (title, body, comments), summaries of linked URLs, and the repository README to determine the issue's suitability as a task potentially solvable by an autonomous AI software agent. Focus on understanding the core problem, its complexity, requirements, and the overall context provided by the README.
+Analyze the following GitHub issue content (title, body, comments), summaries of linked URLs, and the repository README (if provided) to determine the issue's suitability as a task potentially solvable by an autonomous AI software agent. Focus on understanding the core problem, its complexity, requirements, and the overall context provided by the README.
 
 **Repository README Content:**
 
@@ -361,12 +384,12 @@ Analyze the following GitHub issue content (title, body, comments), summaries of
 **Input Issue Content:**
 
 *   **Title:** {title}
-*   **Body:**
+*   **Body (HTML):**
+    ```html
+    {body_html}
     ```
-    {body}
-    ```
-*   **Comments (selected):**
-    ```
+*   **Comments (HTML, selected):**
+    ```html
     {comments_str}
     ```
 
@@ -376,8 +399,9 @@ Analyze the following GitHub issue content (title, body, comments), summaries of
 
 **Instructions:**
 
-Your task is to analyze the provided GitHub issue content (title, body, comments), the summaries of linked URLs, AND the repository README content.
+Your task is to analyze the provided GitHub issue content (title, body, comments), the summaries of linked URLs, AND the repository README content (if provided).
 Based on your combined analysis, generate **ONLY** a valid JSON object that strictly conforms to the following JSON schema.
+{readme_summary_instruction}
 **DO NOT** include any text, explanations, apologies, summaries, or markdown formatting before or after the JSON object. Your entire response must be the JSON object itself.
 
 **Required JSON Output Schema:**
@@ -404,19 +428,23 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
             A dictionary containing the validated analysis data or an 'error' key.
         """
         prompt = self._build_prompt(
-            scraped_data.title, scraped_data.body, scraped_data.comments, url_summaries
+            scraped_data.title,
+            scraped_data.body_html,  # Use body_html
+            scraped_data.comments_html,  # Use comments_html
+            url_summaries,
+            readme_text,  # Pass the readme_text argument here
         )
         if not prompt:
             return {"error": "Cannot analyze issue without a title."}
 
-        logging.info(f"    Analyzing with LLM ({LLM_MODEL})...")
+        logging.info(f"    Analyzing with LLM ({ENRICHER_LLM_MODEL})...")
         analysis_result: Optional[LLMIssueAnalysisSchema] = None
         error_message: Optional[str] = None
         raw_llm_output: Optional[str] = None
 
         try:
             response = litellm.completion(
-                model=LLM_MODEL,
+                model=ENRICHER_LLM_MODEL,  # Use configured enricher model
                 messages=[{"role": "user", "content": prompt}],
                 response_format=LLMIssueAnalysisSchema,
             )
@@ -480,23 +508,25 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
         # --- End README scrape ---
 
         logging.info(f"Processing issues for repo: {repo_name}")
-        for issue_info in found_issues:  # Iterate through issue dicts now
-            # Extract number and URL from the dict
-            issue_number = issue_info.get("number")
-            issue_url = issue_info.get("html_url")
+        # Iterate through the list of issue numbers directly
+        for issue_number in found_issues:
+            # Construct the issue URL
+            issue_url = f"{repo_html_url}/issues/{issue_number}"
+            logging.debug(
+                f"  Processing issue number: {issue_number}, URL: {issue_url}"
+            )
 
-            # Basic validation of the issue info from the cache
-            if not isinstance(issue_number, int) or not issue_url:
+            # Basic validation of the issue number from the cache
+            if not isinstance(issue_number, int) or issue_number <= 0:
                 logging.warning(
-                    f"  Skipping invalid issue entry in {repo_name}: {issue_info}"
+                    f"  Skipping invalid issue number in {repo_name}: {issue_number}"
                 )
-                # Optionally create an error analysis entry
-                error_str = f"Invalid issue data in cache: {issue_info}"
+                error_str = f"Invalid issue number in cache: {issue_number}"
                 analysis = IssueAnalysis(
-                    issue_number=issue_number or -1,  # Use -1 if number is missing
-                    issue_url=issue_url or "Unknown URL",
+                    issue_number=issue_number,
+                    issue_url=issue_url,  # Still log the constructed URL if possible
                     error=error_str,
-                    full_problem_statement="Error: Invalid issue data format in cache.",
+                    full_problem_statement="Error: Invalid issue number format in cache.",
                     complexity_score=-1.0,
                     is_good_first_issue_for_agent=False,
                     reasoning="N/A - Invalid cache data",
@@ -508,30 +538,12 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
                 analysis_results.append(analysis)
                 continue
 
+            # --- Issue processing starts here ---
             analysis: Optional[IssueAnalysis] = None
             error_str: Optional[str] = None
             url_summaries: List[Dict[str, str]] = []  # Initialize for each issue
 
-            if not isinstance(issue_number, int):
-                error_str = f"Invalid issue number format: {issue_number}"
-                logging.warning(f"  Warning: {error_str} in {repo_name}.")
-                analysis = IssueAnalysis(
-                    issue_number=issue_number,
-                    issue_url=issue_url,
-                    error=error_str,
-                    full_problem_statement="Error: Invalid issue number format.",
-                    complexity_score=-1.0,
-                    is_good_first_issue_for_agent=False,
-                    reasoning="N/A - Invalid issue number",
-                    required_domain_knowledge=-1.0,
-                    codebase_familiarity_needed=-1.0,
-                    scope_clarity=-1.0,
-                    meta_notes="Invalid issue number provided in cache.",
-                )
-                analysis_results.append(analysis)
-                continue
-
-            # 1. Scrape Issue Content
+            # 1. Scrape Issue Content using the constructed issue_url
             scraped_data = self.scrape_github_issue(issue_url)
             if scraped_data.error:
                 error_str = f"Scraping failed: {scraped_data.error}"
@@ -551,20 +563,17 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
                 analysis_results.append(analysis)
                 continue
 
-            # --- Start: URL Processing (Refactored) ---
+            # --- Start: URL Processing (Using HTML) ---
             url_summaries = []  # Initialize empty list
-            if scraped_data.title:  # Only process URLs if we have basic issue data
-                # Combine text for URL extraction
-                combined_text = (
-                    f"{scraped_data.title}\n{scraped_data.body}\n"
-                    + "\n".join(scraped_data.comments)
-                )
-                # Call the refactored URL processing function
+            if scraped_data.title and (
+                scraped_data.body_html or scraped_data.comments_html
+            ):
+                # Pass HTML content and base URL to the processing function
                 url_summaries = process_urls_for_issue(
-                    combined_text=combined_text,
+                    body_html=scraped_data.body_html or "",
+                    comments_html=scraped_data.comments_html,
                     issue_title=scraped_data.title,
-                    issue_body=scraped_data.body or "",  # Pass body or empty string
-                    issue_url_for_logging=issue_url,
+                    base_issue_url=issue_url,  # Pass the issue URL for resolving relative links
                 )
             # --- End: URL Processing ---
 

@@ -1,6 +1,7 @@
 import os
-from dotenv import load_dotenv
 from typing import Final
+
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -12,3 +13,8 @@ if not GITHUB_TOKEN:
 CONCURRENCY: Final[int] = int(os.getenv("CONCURRENCY", "20"))
 CACHE_DIR: Final[str] = os.getenv("CACHE_DIR", "cache")
 OUTPUT_DIR: Final[str] = os.getenv("OUTPUT_DIR", "output")
+
+# LLM model specifically for the main enrichment process
+ENRICHER_LLM_MODEL: Final[str] = os.getenv(
+    "ENRICHER_LLM_MODEL", "openrouter/google/gemini-2.5-pro-preview-03-25"
+)

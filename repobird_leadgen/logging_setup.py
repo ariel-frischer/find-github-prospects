@@ -61,6 +61,7 @@ def setup_logging(command_name: str, log_level: int = logging.INFO):
     root_logger.addHandler(console_handler)
 
     # Optional: Silence overly verbose libraries if needed
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)  # Silence LiteLLM INFO logs
     # logging.getLogger("urllib3").setLevel(logging.WARNING)
     # logging.getLogger("playwright").setLevel(logging.WARNING)
 

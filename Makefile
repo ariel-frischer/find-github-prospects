@@ -110,4 +110,9 @@ test-url-search:
 	fi
 	$(VENV_RUN) repobird-leadgen test-url-search "$(REPO)" $(ARGS)
 
-.PHONY: install-dev fix test all install-browsers run run-browser update-cache aider aider-test enrich review post-process filter-prs test-url-search
+# Test the Copilot LLM API summarization script
+test-copilot:
+	@echo "Running Copilot LLM API test script..."
+	@$(VENV_RUN) python scripts/test-copilot.py
+
+.PHONY: install-dev fix test all install-browsers run run-browser update-cache aider aider-test enrich review post-process filter-prs test-url-search test-copilot
