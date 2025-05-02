@@ -1,20 +1,24 @@
+import json
 import logging
 import os
 import re
+import traceback
 from typing import Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
 import litellm
 from bs4 import BeautifulSoup
 from goose3 import Goose
+from pydantic import ValidationError
 
-# Removed URLExtract import as we now parse HTML
-# from urlextract import URLExtract
+# Import the new Pydantic model
+from .models import UrlSummarySchema
 
 # --- Configuration ---
 # LLM specifically for URL summarization (Enricher uses ENRICHER_LLM_MODEL from config)
+# Updated default model based on potential performance/cost
 SUMMARIZER_LLM_MODEL = os.getenv(
-    "SUMMARIZER_LLM_MODEL", "openrouter/deepseek/deepseek-chat-v3-0324"
+    "SUMMARIZER_LLM_MODEL", "openrouter/google/gemini-flash-1.5"
 )
 MAX_CONTENT_LENGTH_FOR_SUMMARY = 200000  # Limit input to summarizer LLM
 
@@ -153,48 +157,109 @@ def _scrape_url_content(url: str) -> Optional[str]:
 
 
 def _summarize_content(
-    url: str, content: str, issue_title: str, issue_body: str
-) -> Optional[str]:
-    """Summarizes the scraped content using an LLM, focusing on relevance to the issue."""
+    url: str, content: str, issue_title: str, issue_body_context: str
+) -> Optional[UrlSummarySchema]:
+    """
+    Summarizes scraped content using an LLM, expecting a JSON response conforming
+    to UrlSummarySchema.
+
+    Args:
+        url: The URL the content was scraped from.
+        content: The scraped text content.
+        issue_title: The title of the original GitHub issue.
+        issue_body_context: Plain text context from the issue body.
+
+    Returns:
+        A validated UrlSummarySchema object if successful, otherwise None.
+    """
+    logger.info(f"Requesting LLM summary/relevance check for: {url}")
+    # Truncate content if necessary
+    truncated_content = content[:MAX_CONTENT_LENGTH_FOR_SUMMARY]
+    if len(content) > MAX_CONTENT_LENGTH_FOR_SUMMARY:
+        truncated_content += " ... (truncated due to length)"
+
+    # Get schema as JSON string
+    schema_json = json.dumps(UrlSummarySchema.model_json_schema(), indent=2)
+
+    # Construct prompt asking for JSON output
+    summarization_prompt = f"""
+Analyze the following 'Content from linked URL' in the context of the 'Original GitHub Issue'.
+
+Original GitHub Issue Title: {issue_title}
+Original GitHub Issue Body Context:
+{issue_body_context}
+
+---
+Content from linked URL ({url}):
+{truncated_content}
+
+---
+Task: Determine if the 'Content from linked URL' is relevant to understanding or resolving the 'Original GitHub Issue'.
+If it IS relevant, provide a concise summary focusing *only* on the relevant aspects.
+If it IS NOT relevant, indicate that.
+
+Generate **ONLY** a valid JSON object conforming strictly to the following schema. Do not include any text before or after the JSON object.
+
+Required JSON Output Schema:
+```json
+{schema_json}
+```
+
+JSON Output:
+"""
+    raw_llm_output: Optional[str] = None
     try:
-        logger.info(f"Summarizing content from: {url}")
-        # Truncate content if necessary and add indicator
-        truncated_content = content[:MAX_CONTENT_LENGTH_FOR_SUMMARY]
-        if len(content) > MAX_CONTENT_LENGTH_FOR_SUMMARY:
-            truncated_content += " ... (truncated due to length)"
-
-        # Construct summarization prompt
-        summarization_prompt = f"""
-        Original GitHub Issue Title: {issue_title}
-        Original GitHub Issue Body:
-        {issue_body}
-
-        ---
-        Content from linked URL ({url}):
-        {truncated_content}
-
-        ---
-        Task: Summarize the above 'Content from linked URL', focusing *only* on aspects relevant to the 'Original GitHub Issue Title' and 'Original GitHub Issue Body'. If the content is irrelevant, state that clearly (e.g., "Content is irrelevant to the issue.").
-        """
-        # Call LLM for summarization
+        # Call LLM, requesting structured output via Pydantic model
         response = litellm.completion(
-            model=SUMMARIZER_LLM_MODEL,  # Use summarizer-specific model
+            model=SUMMARIZER_LLM_MODEL,
             messages=[{"role": "user", "content": summarization_prompt}],
-            # max_tokens=150,  # Keep summaries concise
-            # temperature=0.2,  # Low temperature for factual summary
+            response_format=UrlSummarySchema,  # Request structured output
         )
-        # response_cost = getattr(response, "response_cost", None) # Removed print
-        # print(f"response_cost={response_cost}") # Removed print
-        summary = response.choices[0].message.content.strip()
-        if summary:
-            logger.info(f"Summarized: {url}")
-            logger.info(f"  Summary for {url}: {summary}")  # Log the summary content
-            return summary
+
+        # LiteLLM returns the parsed Pydantic object directly when response_format is used
+        if response.choices and response.choices[0].message.content:
+            # The content should already be the parsed Pydantic object
+            # However, LiteLLM's type hints might be generic, so we validate just in case
+            # (or if the API response structure changes)
+            llm_data = response.choices[0].message.content
+            if isinstance(llm_data, UrlSummarySchema):
+                validated_data = llm_data
+            elif isinstance(llm_data, dict):  # Fallback if it returns dict
+                validated_data = UrlSummarySchema.model_validate(llm_data)
+            elif isinstance(llm_data, str):  # Fallback if it returns string
+                raw_llm_output = llm_data.strip()
+                parsed_json = json.loads(raw_llm_output)
+                validated_data = UrlSummarySchema.model_validate(parsed_json)
+            else:
+                raise TypeError(
+                    f"Unexpected response content type from LiteLLM: {type(llm_data)}"
+                )
+
+            logger.info(
+                f"LLM relevance/summary successful for {url}: Relevant={validated_data.is_relevant}"
+            )
+            # Log the full response object if relevant
+            if validated_data.is_relevant:
+                logger.info(f"  Relevant URL Summary Response: {validated_data}")
+            return validated_data
         else:
-            logger.warning(f"LLM returned empty summary for: {url}")
+            logger.warning(f"LLM returned empty or invalid response for: {url}")
             return None
+
+    except json.JSONDecodeError as json_e:
+        logger.error(
+            f"Could not parse LLM JSON output for {url}: {json_e}. Raw response: {raw_llm_output}"
+        )
+        return None
+    except ValidationError as validation_e:
+        logger.error(
+            f"LLM output failed Pydantic validation for {url}: {validation_e}. Raw response: {raw_llm_output}"
+        )
+        return None
     except Exception as e:
-        logger.warning(f"LLM summarization failed for URL {url}: {e}", exc_info=True)
+        logger.error(
+            f"LLM summarization failed for URL {url}: {e}\n{traceback.format_exc()}"
+        )
         return None
 
 
@@ -206,14 +271,13 @@ def process_urls_for_issue(
 ) -> List[Dict[str, str]]:
     """
     Extracts relevant URLs from issue body and comment HTML, scrapes them,
-    summarizes relevant content, and returns a list of summaries.
+    summarizes relevant content, and returns a list of *relevant* summaries.
 
     Args:
         body_html: The HTML content of the issue body.
         comments_html: A list of HTML strings, one for each comment.
         issue_title: The title of the original issue for context.
-        base_issue_url: The URL of the issue page, used for resolving relative links
-                        and logging.
+        base_issue_url: The URL of the issue page, used for resolving relative links.
 
     Returns:
         A list of dictionaries, where each dictionary contains 'url' and 'summary'.
@@ -237,28 +301,48 @@ def process_urls_for_issue(
         )
 
         if not unique_urls:
-            return url_summaries
+            return url_summaries  # Return empty list if no URLs found
 
-        # Use issue title and *plain text* of body for summarization context
-        # (We don't have plain text body easily here, maybe pass it or scrape it again lightly?)
-        # For now, let's just use the title as primary context for the summarizer.
-        # A better approach might involve getting plain text from the HTML body earlier.
-        issue_body_context = "Body context not available for summarizer."  # Placeholder
+        # Attempt to get plain text from body HTML for better context
+        try:
+            soup = BeautifulSoup(body_html, "html.parser")
+            issue_body_context = soup.get_text(separator=" ", strip=True)
+            if not issue_body_context:
+                issue_body_context = (
+                    "Could not extract plain text from issue body HTML."
+                )
+            logger.debug("Extracted plain text context from body HTML for summarizer.")
+        except Exception:
+            issue_body_context = "Error extracting plain text from issue body HTML."
+            logger.warning(f"{issue_body_context}", exc_info=True)
 
         for url in unique_urls:
-            # Removed the explicit skip for github.com URLs to allow scraping linked issues/PRs.
-            # if "github.com" in urlparse(url).netloc.lower():
-            #     logger.info(f"Skipping scraping of internal GitHub URL: {url}")
-            #     continue
-
             content = _scrape_url_content(url)
             if content:
-                # Pass title and placeholder body context to summarizer
-                summary = _summarize_content(
+                # Call the updated summarizer function
+                summary_result: Optional[UrlSummarySchema] = _summarize_content(
                     url, content, issue_title, issue_body_context
                 )
-                if summary:
-                    url_summaries.append({"url": url, "summary": summary})
+
+                # Check the result and add to list only if relevant and summary exists
+                if (
+                    summary_result
+                    and summary_result.is_relevant
+                    and summary_result.summary
+                ):
+                    url_summaries.append(
+                        {"url": url, "summary": summary_result.summary}
+                    )
+                    # Log the actual summary content
+                    logger.info(f"Added relevant summary for URL: {url}")
+                    logger.info(
+                        f"  Summary: {summary_result.summary[:100]}..."
+                    )  # Log first 100 chars
+                elif summary_result and not summary_result.is_relevant:
+                    logger.info(f"URL content deemed irrelevant by LLM: {url}")
+                else:
+                    logger.warning(f"No valid/relevant summary obtained for URL: {url}")
+
             # Consider adding delay here if needed: time.sleep(0.5)
 
     except Exception as e:

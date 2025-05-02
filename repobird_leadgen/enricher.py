@@ -451,7 +451,6 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
             logging.info(f"response={response}")
             # Extract the model's JSON output string
             raw_llm_output = response.choices[0].message.content
-            logging.info(f"raw_llm_output={raw_llm_output}")
 
             # Parse the raw JSON string and validate against the Pydantic model
             json_string = raw_llm_output.strip()
