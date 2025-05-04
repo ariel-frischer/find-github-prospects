@@ -1,5 +1,6 @@
 import json
 import logging
+import multiprocessing  # Import for Lock type hint
 import traceback
 from dataclasses import (
     dataclass,
@@ -32,8 +33,7 @@ from .models import IssueAnalysis, LLMIssueAnalysisSchema
 
 # Import the new URL processing function and cost tracking helper
 from .url_processor import process_urls_for_issue
-from .utils import _update_shared_cost, CostDataType  # Import helper and type hint
-import multiprocessing  # Import for Lock type hint
+from .utils import CostDataType, _update_shared_cost  # Import helper and type hint
 
 # --- Configuration ---
 # Ensure API keys (e.g., OPENROUTER_API_KEY, GOOGLE_API_KEY) are set in your environment for LiteLLM
@@ -524,47 +524,69 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
         # --- End README scrape ---
 
         logging.info(f"Processing issues for repo: {repo_name}")
-        # Iterate through the list of issue numbers directly
-        for issue_number in found_issues:
-            # Construct the issue URL
-            issue_url = f"{repo_html_url}/issues/{issue_number}"
-            logging.debug(
-                f"  Processing issue number: {issue_number}, URL: {issue_url}"
-            )
+        # Iterate through the list of found issues (can be dicts or ints)
+        for issue_entry in found_issues:
+            issue_number: Optional[int] = None
+            issue_url: Optional[str] = None
+            error_str: Optional[str] = None
+            analysis: Optional[IssueAnalysis] = None  # Initialize analysis here
 
-            # Basic validation of the issue number from the cache
-            if not isinstance(issue_number, int) or issue_number <= 0:
+            # --- Determine issue number and URL from cache entry ---
+            if isinstance(issue_entry, dict):
+                issue_number = issue_entry.get("number")
+                issue_url = issue_entry.get("html_url")
+                if not issue_number or not issue_url:
+                    error_str = f"Invalid issue dictionary in cache: {issue_entry}"
+            elif isinstance(issue_entry, int):
+                # Handle older cache format (list of ints)
+                issue_number = issue_entry
+                issue_url = f"{repo_html_url}/issues/{issue_number}"
+                logging.debug(f"Processing issue number (int format): {issue_number}")
+            else:
+                error_str = f"Invalid issue entry format in cache: {issue_entry}"
+
+            # --- Basic validation and error handling ---
+            if error_str or not isinstance(issue_number, int) or issue_number <= 0:
+                log_msg = error_str or f"Invalid issue number value: {issue_number}"
                 logging.warning(
-                    f"  Skipping invalid issue number in {repo_name}: {issue_number}"
+                    f"  Skipping invalid issue entry in {repo_name}: {log_msg}"
                 )
-                error_str = f"Invalid issue number in cache: {issue_number}"
+                # Try to create an error analysis object, using -1 if number is totally invalid
+                invalid_num_for_model = (
+                    issue_number if isinstance(issue_number, int) else -1
+                )
+                invalid_url_for_model = issue_url or f"{repo_html_url}/issues/invalid"
                 analysis = IssueAnalysis(
-                    issue_number=issue_number,
-                    issue_url=issue_url,  # Still log the constructed URL if possible
-                    error=error_str,
-                    full_problem_statement="Error: Invalid issue number format in cache.",
+                    issue_number=invalid_num_for_model,
+                    issue_url=invalid_url_for_model,
+                    error=log_msg,
+                    full_problem_statement=f"Error: {log_msg}",
                     complexity_score=-1.0,
                     is_good_first_issue_for_agent=False,
                     reasoning="N/A - Invalid cache data",
                     required_domain_knowledge=-1.0,
                     codebase_familiarity_needed=-1.0,
                     scope_clarity=-1.0,
-                    meta_notes="Invalid issue data provided in cache.",
+                    # Removed duplicate arguments below
+                    meta_notes=f"Invalid issue data provided in cache: {issue_entry}",
                 )
                 analysis_results.append(analysis)
-                continue
+                continue  # Skip to the next issue_entry in the loop
 
-            # --- Issue processing starts here ---
-            analysis: Optional[IssueAnalysis] = None
-            error_str: Optional[str] = None
+            # --- Issue processing starts here (issue_number and issue_url are valid) ---
+            logging.debug(
+                f"  Processing issue number: {issue_number}, URL: {issue_url}"
+            )
             url_summaries: List[Dict[str, str]] = []  # Initialize for each issue
 
             # 1. Scrape Issue Content using the constructed issue_url
-            scraped_data = self.scrape_github_issue(issue_url)
+            scraped_data = self.scrape_github_issue(
+                issue_url
+            )  # issue_url is guaranteed non-None here
             if scraped_data.error:
                 error_str = f"Scraping failed: {scraped_data.error}"
                 analysis = IssueAnalysis(
-                    issue_number=issue_number,
+                    issue_number=issue_number,  # issue_number is guaranteed int here
                     issue_url=issue_url,
                     error=error_str,
                     full_problem_statement=f"Error: Failed to scrape issue content. Details: {error_str}",
