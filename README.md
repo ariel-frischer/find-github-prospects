@@ -244,7 +244,6 @@ This workflow uses the LLM analysis primarily for context during a manual review
 
 ## Roadmap / Future Enhancements
 
-*   **URL Content Extraction & Summarization:** (Implemented) Identify URLs, scrape content, generate summaries, and incorporate into LLM analysis.
 *   **Advanced Comment Scraping:** Implement logic to handle pagination or dynamic loading of comments on GitHub issue pages to capture the full discussion context for very long threads.
 *   **Configurable LLM Prompts:** Allow users to customize the system prompt used for issue analysis via configuration files.
 *   **Alternative Output Formats:** Reintroduce support for different output formats (e.g., CSV, Markdown table) for the final enriched data, potentially using libraries like `pandas` for easier conversion.
