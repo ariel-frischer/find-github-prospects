@@ -1,5 +1,6 @@
 import json
 import logging
+import multiprocessing  # Import for Lock type hint
 import os
 import re
 import traceback
@@ -11,14 +12,16 @@ from bs4 import BeautifulSoup
 from goose3 import Goose
 from pydantic import ValidationError
 
-# Import the new Pydantic model
+# Import the new Pydantic model and cost tracking helper
 from .models import UrlSummarySchema
+from .utils import CostDataType, _update_shared_cost  # Import helper and type hint
 
 # --- Configuration ---
 # LLM specifically for URL summarization (Enricher uses ENRICHER_LLM_MODEL from config)
-# Updated default model based on potential performance/cost
+# Use Gemini 2.5 Flash Preview as the default
 SUMMARIZER_LLM_MODEL = os.getenv(
-    "SUMMARIZER_LLM_MODEL", "openrouter/google/gemini-flash-1.5"
+    "SUMMARIZER_LLM_MODEL",
+    "openrouter/google/gemini-2.5-flash-preview",  # Updated default
 )
 MAX_CONTENT_LENGTH_FOR_SUMMARY = 200000  # Limit input to summarizer LLM
 
@@ -157,10 +160,16 @@ def _scrape_url_content(url: str) -> Optional[str]:
 
 
 def _summarize_content(
-    url: str, content: str, issue_title: str, issue_body_context: str
+    url: str,
+    content: str,
+    issue_title: str,
+    issue_body_context: str,
+    shared_cost_data: CostDataType,  # Add shared dict
+    lock: multiprocessing.Lock,  # Add lock
 ) -> Optional[UrlSummarySchema]:
     """
-    Summarizes scraped content using an LLM, expecting a JSON response conforming
+    Summarizes scraped content using an LLM, updates shared cost data,
+    and expects a JSON response conforming
     to UrlSummarySchema.
 
     Args:
@@ -216,6 +225,10 @@ JSON Output:
             response_format=UrlSummarySchema,  # Request structured output
         )
 
+        # --- Call Cost Tracking Helper ---
+        _update_shared_cost(response, shared_cost_data, lock, f"URL Summary ({url})")
+        # --- End Cost Tracking Call ---
+
         # LiteLLM returns the parsed Pydantic object directly when response_format is used
         if response.choices and response.choices[0].message.content:
             # The content should already be the parsed Pydantic object
@@ -268,9 +281,12 @@ def process_urls_for_issue(
     comments_html: List[str],
     issue_title: str,
     base_issue_url: str,
+    shared_cost_data: CostDataType,  # Add shared dict
+    lock: multiprocessing.Lock,  # Add lock
 ) -> List[Dict[str, str]]:
     """
-    Extracts relevant URLs from issue body and comment HTML, scrapes them,
+    Extracts relevant URLs, scrapes them, summarizes relevant content (updating shared cost data),
+    and returns a list of *relevant* summaries.
     summarizes relevant content, and returns a list of *relevant* summaries.
 
     Args:
@@ -319,9 +335,14 @@ def process_urls_for_issue(
         for url in unique_urls:
             content = _scrape_url_content(url)
             if content:
-                # Call the updated summarizer function
+                # Call the updated summarizer function, passing shared objects
                 summary_result: Optional[UrlSummarySchema] = _summarize_content(
-                    url, content, issue_title, issue_body_context
+                    url,
+                    content,
+                    issue_title,
+                    issue_body_context,
+                    shared_cost_data,
+                    lock,
                 )
 
                 # Check the result and add to list only if relevant and summary exists

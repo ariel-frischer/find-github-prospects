@@ -1,4 +1,5 @@
 import json
+import logging  # Import logging
 import multiprocessing
 import queue  # For QueueEmpty exception
 from concurrent.futures import (
@@ -7,18 +8,51 @@ from concurrent.futures import (
     as_completed,
 )
 from pathlib import Path
-import logging  # Import logging
 from typing import Any, Callable, Dict, Iterable, List, TypeVar
+
+import litellm  # Add import for type hinting
 
 # from rich.console import Console # Remove Console import
 from rich.progress import Progress
-from tqdm import tqdm  # Add this import back for parallel_map
+from tqdm import tqdm
 
 T = TypeVar("T")
 R = TypeVar("R")
 
+# Type hint for the shared dictionary
+CostDataType = Dict[str, Any]
+
 # Get logger for this module
 logger = logging.getLogger(__name__)
+
+# --- Manual Cost Calculation ---
+# Costs are per 1,000,000 tokens (divide by 1e6 for per-token cost)
+# Source: User provided Gemini 2.5 Flash/Pro costs
+# Ensure model names here EXACTLY match those returned by LiteLLM/OpenRouter
+# (e.g., in response.model) and used in config.py/url_processor.py
+MODEL_COST_MAP = {
+    # Summarizer Model (Gemini Flash 2.5 Preview via OpenRouter)
+    "openrouter/google/gemini-2.5-flash-preview": {  # Updated model name
+        "input_cost_per_token": 0.15 / 1_000_000,  # Cost per user request
+        "output_cost_per_token": 0.60 / 1_000_000,  # Cost per user request
+    },
+    # Summarizer Model (Gemini Flash 2.5 Preview via Google directly)
+    "google/gemini-2.5-flash-preview": {  # Added direct Google model
+        "input_cost_per_token": 0.15 / 1_000_000,
+        "output_cost_per_token": 0.60 / 1_000_000,
+    },
+    # Enricher Model (Gemini Pro 2.5 Preview via OpenRouter)
+    "openrouter/google/gemini-2.5-pro-preview-03-25": {
+        "input_cost_per_token": 1.25 / 1_000_000,
+        "output_cost_per_token": 10.00 / 1_000_000,
+    },
+    # Enricher Model (Gemini Pro 2.5 Preview via Google directly)
+    "google/gemini-2.5-pro-preview-03-25": {  # Added direct Google model
+        "input_cost_per_token": 1.25 / 1_000_000,
+        "output_cost_per_token": 10.00 / 1_000_000,
+    },
+    # Add other models used here if necessary
+}
 
 
 def parallel_map(
@@ -63,6 +97,79 @@ def parallel_map(
     # return ordered_results # If None needs to be preserved as failure indicator
 
 
+# --- Cost Tracking Helper ---
+
+
+def _update_shared_cost(
+    response: litellm.utils.ModelResponse,  # Use ModelResponse for type hint
+    shared_cost_data: CostDataType,
+    lock: multiprocessing.Lock,
+    call_description: str,
+):
+    """
+    Safely updates shared cost/token data and logs individual call details using manual calculation.
+    """
+    try:
+        # Get model name and usage from response
+        model_name = getattr(response, "model", None)
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "prompt_tokens", 0)
+        output_tokens = getattr(usage, "completion_tokens", 0)
+
+        if not model_name or usage is None:
+            logger.warning(
+                f"    Could not get model name or usage from response for {call_description}. Cannot calculate cost."
+            )
+            return
+
+        # Look up costs in the map
+        cost_info = MODEL_COST_MAP.get(model_name)
+
+        if cost_info:
+            # Calculate cost manually
+            input_cost = input_tokens * cost_info["input_cost_per_token"]
+            output_cost = output_tokens * cost_info["output_cost_per_token"]
+            total_call_cost = input_cost + output_cost
+
+            logger.info(
+                f"    LLM Call Cost ({call_description} - {model_name}): ${total_call_cost:.6f} "
+                f"(In: {input_tokens}, Out: {output_tokens})"
+            )
+
+            # Update shared data
+            with lock:
+                shared_cost_data["total_cost"] = (
+                    shared_cost_data.get("total_cost", 0.0) + total_call_cost
+                )
+                shared_cost_data["total_input_tokens"] = (
+                    shared_cost_data.get("total_input_tokens", 0) + input_tokens
+                )
+                shared_cost_data["total_output_tokens"] = (
+                    shared_cost_data.get("total_output_tokens", 0) + output_tokens
+                )
+        else:
+            logger.warning(
+                f"    Cost info not found in MODEL_COST_MAP for model: {model_name}. Cannot calculate cost for {call_description}."
+            )
+            # Still update token counts even if cost is unknown
+            with lock:
+                shared_cost_data["total_input_tokens"] = (
+                    shared_cost_data.get("total_input_tokens", 0) + input_tokens
+                )
+                shared_cost_data["total_output_tokens"] = (
+                    shared_cost_data.get("total_output_tokens", 0) + output_tokens
+                )
+
+    except AttributeError as ae:
+        logger.warning(
+            f"    Attribute error accessing response data for {call_description}: {ae}"
+        )
+    except Exception as e:
+        logger.warning(
+            f"    Error processing cost/token data for {call_description}: {e}"
+        )
+
+
 # --- New function for incremental saving ---
 
 _SENTINEL = None  # Signal for the writer process to stop
@@ -102,9 +209,7 @@ def _writer_process(
                     continue
                 except (EOFError, BrokenPipeError):
                     # Parent process might have exited unexpectedly
-                    logger.error(
-                        "Writer process: Communication pipe broken. Exiting."
-                    )
+                    logger.error("Writer process: Communication pipe broken. Exiting.")
                     break
                 except Exception as e:
                     # Log errors during writing but try to continue
@@ -115,9 +220,7 @@ def _writer_process(
                     progress.update(task, advance=1)
 
     except Exception as e:
-        logger.exception(
-            f"Writer process failed to open/write file {output_file}: {e}"
-        )
+        logger.exception(f"Writer process failed to open/write file {output_file}: {e}")
     finally:
         logger.info(
             f"Writer process finished. Items written: {processed_count}/{total_items}"
@@ -125,11 +228,18 @@ def _writer_process(
 
 
 def _worker_wrapper(
-    fn: Callable[[Any], Dict[str, Any]], item: Any, output_queue: multiprocessing.Queue
+    fn: Callable[
+        [Any, CostDataType, multiprocessing.Lock], Dict[str, Any]
+    ],  # Add shared types to signature
+    item: Any,
+    output_queue: multiprocessing.Queue,
+    shared_cost_data: CostDataType,  # Add shared dict
+    lock: multiprocessing.Lock,  # Add lock
 ):
     """Wrapper to run the target function and put the result on the queue."""
     try:
-        result = fn(item)
+        # Pass shared data and lock to the target function
+        result = fn(item, shared_cost_data, lock)
         output_queue.put(result)
     except Exception as e:
         # Log error and potentially put an error object on the queue if needed
@@ -140,21 +250,28 @@ def _worker_wrapper(
 
 
 def parallel_map_and_save(
-    fn: Callable[[Any], Dict[str, Any]],
+    fn: Callable[
+        [Any, CostDataType, multiprocessing.Lock], Dict[str, Any]
+    ],  # Update fn signature hint
     items: Iterable[Any],
     output_file: Path,
     max_workers: int,
-    desc: str = "Processing items",
+    shared_cost_data: CostDataType,  # Add shared dict parameter
+    lock: multiprocessing.Lock,  # Add lock parameter
+    desc: str = "Processing items",  # This desc is unused now
 ):
     """
-    Processes items in parallel using ProcessPoolExecutor and saves results
-    incrementally to a JSON Lines file via a dedicated writer process.
+    Processes items in parallel using ProcessPoolExecutor, saves results
+    incrementally, and aggregates cost/token data using shared objects.
 
     Args:
-        fn: The function to apply to each item. Must return a dictionary.
+        fn: The function to apply to each item. Must accept item, shared_cost_data, lock
+            and return a dictionary.
         items: An iterable of items to process.
         output_file: The Path object for the output JSON Lines file.
         max_workers: The maximum number of worker processes.
+        shared_cost_data: The shared dictionary for accumulating costs/tokens.
+        lock: The shared lock for accessing shared_cost_data.
         desc: Description for the overall progress bar (not used for writer).
     """
     items_list = list(
@@ -181,9 +298,11 @@ def parallel_map_and_save(
     processed_count = 0
     try:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit tasks using the wrapper
+            # Submit tasks using the wrapper, passing shared objects
             futures = [
-                executor.submit(_worker_wrapper, fn, item, output_queue)
+                executor.submit(
+                    _worker_wrapper, fn, item, output_queue, shared_cost_data, lock
+                )
                 for item in items_list
             ]
 

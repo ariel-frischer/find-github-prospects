@@ -30,8 +30,10 @@ from .config import ENRICHER_LLM_MODEL
 # Import the Pydantic models from models.py
 from .models import IssueAnalysis, LLMIssueAnalysisSchema
 
-# Import the new URL processing function
+# Import the new URL processing function and cost tracking helper
 from .url_processor import process_urls_for_issue
+from .utils import _update_shared_cost, CostDataType  # Import helper and type hint
+import multiprocessing  # Import for Lock type hint
 
 # --- Configuration ---
 # Ensure API keys (e.g., OPENROUTER_API_KEY, GOOGLE_API_KEY) are set in your environment for LiteLLM
@@ -419,9 +421,12 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
         scraped_data: ScrapedIssueData,
         url_summaries: List[Dict[str, str]],
         readme_text: Optional[str],  # Add readme_text parameter
+        shared_cost_data: CostDataType,  # Add shared dict
+        lock: multiprocessing.Lock,  # Add lock
     ) -> Dict[str, Any]:
         """
-        Analyzes the scraped issue data, URL summaries, and README using LiteLLM, expecting a JSON object
+        Analyzes the scraped issue data, URL summaries, and README using LiteLLM,
+        updates shared cost data, and expects a JSON object
         that conforms to the LLMIssueAnalysisSchema Pydantic model.
 
         Returns:
@@ -457,6 +462,12 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
             llm_data = json.loads(json_string)
             analysis_result = LLMIssueAnalysisSchema.model_validate(llm_data)
             logging.info("    LLM Analysis successful and validated.")
+
+            # --- Call Cost Tracking Helper ---
+            # Pass the original response object, shared data, lock, and description
+            _update_shared_cost(response, shared_cost_data, lock, "Issue Analysis")
+            # --- End Cost Tracking Call ---
+
             # Return the validated data as a dictionary
             return analysis_result.model_dump()
 
@@ -478,9 +489,15 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
             # Should not happen if logic is correct, but as a fallback
             return {"error": "Unknown error during LLM analysis."}
 
-    def process_repo(self, repo_data: Dict[str, Any]) -> List[IssueAnalysis]:
+    def process_repo(
+        self,
+        repo_data: Dict[str, Any],
+        shared_cost_data: CostDataType,  # Add shared dict
+        lock: multiprocessing.Lock,  # Add lock
+    ) -> List[IssueAnalysis]:
         """
-        Processes a single repository's data: scrapes and analyzes its found issues.
+        Processes a single repository's data: scrapes and analyzes its found issues,
+        passing shared cost objects down.
 
         Args:
             repo_data: A dictionary representing a repository's data from the cache file,
@@ -573,6 +590,8 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
                     comments_html=scraped_data.comments_html,
                     issue_title=scraped_data.title,
                     base_issue_url=issue_url,  # Pass the issue URL for resolving relative links
+                    shared_cost_data=shared_cost_data,  # Pass shared data
+                    lock=lock,  # Pass lock
                 )
             # --- End: URL Processing ---
 
@@ -581,6 +600,8 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
                 scraped_data,
                 url_summaries,
                 readme_text,  # Pass readme_text
+                shared_cost_data,  # Pass shared data
+                lock,  # Pass lock
             )
 
             # 3. Validate and Create Pydantic Object
@@ -640,10 +661,15 @@ Based on your combined analysis, generate **ONLY** a valid JSON object that stri
 # --- Helper function for parallel processing ---
 
 
-def enrich_repo_entry(repo_data: Dict[str, Any]) -> Dict[str, Any]:
+def enrich_repo_entry(
+    repo_data: Dict[str, Any],
+    shared_cost_data: CostDataType,  # Add shared dict
+    lock: multiprocessing.Lock,  # Add lock
+) -> Dict[str, Any]:
     """
     Wrapper function to instantiate Enricher and process a single repo's data.
-    Designed for use with parallel_map. Handles Enricher context management.
+    Designed for use with parallel_map_and_save. Handles Enricher context management
+    and passes shared cost objects.
 
     Args:
         repo_data: A dictionary representing a repository's data from the cache file.
@@ -656,9 +682,11 @@ def enrich_repo_entry(repo_data: Dict[str, Any]) -> Dict[str, Any]:
     analysis_list = []
     try:
         with Enricher() as enricher:
-            # process_repo now returns a list of Pydantic IssueAnalysis objects
-            analysis_results: List[IssueAnalysis] = enricher.process_repo(repo_data)
-            # Convert Pydantic objects to dictionaries for JSON serialization using model_dump
+            # Pass shared objects to process_repo
+            analysis_results: List[IssueAnalysis] = enricher.process_repo(
+                repo_data, shared_cost_data, lock
+            )
+            # Convert Pydantic objects to dictionaries for JSON serialization
             analysis_list = [
                 analysis.model_dump(mode="json") for analysis in analysis_results
             ]

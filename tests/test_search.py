@@ -867,9 +867,9 @@ def assert_issue_cache_dump(
         if isinstance(args[0], dict) and args[0].get("repo") == repo_full_name:
             issue_cache_call = c
             break
-    assert issue_cache_call is not None, (
-        f"Issue cache dump call not found for {repo_full_name}"
-    )
+    assert (
+        issue_cache_call is not None
+    ), f"Issue cache dump call not found for {repo_full_name}"
     args, _ = issue_cache_call
     assert args[0]["repo"] == repo_full_name
     assert args[0]["label"] == label

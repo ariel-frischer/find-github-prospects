@@ -1,5 +1,6 @@
 import json
 import logging  # Import logging
+import multiprocessing  # Import multiprocessing
 import os  # Needed for permission checks
 import re  # Add re import for URL parsing
 import shutil
@@ -338,7 +339,7 @@ def enrich(
     logger.info(f"  Output directory: {output_dir}")
     logger.info(f"  Concurrency: {concurrency}")
     logger.info(
-        f"  LLM Model: {os.getenv('LLM_MODEL', 'gemini/gemini-1.5-pro-preview-0409')}"
+        f"  LLM Model: {os.getenv('LLM_MODEL', 'openrouter/google/gemini-2.5-flash-preview')}"
     )  # Show model being used
 
     # Ensure output directory exists
@@ -347,6 +348,19 @@ def enrich(
     # Define output file path
     output_filename = f"enriched_{cache_file.stem}.jsonl"
     output_file = output_dir / output_filename
+
+    # --- Setup for Cost Tracking ---
+    manager = multiprocessing.Manager()
+    # Initialize shared dictionary with expected keys
+    shared_cost_data = manager.dict(
+        {
+            "total_cost": 0.0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+        }
+    )
+    shared_lock = manager.Lock()
+    # --- End Setup ---
 
     try:
         # Load raw repo data dictionaries from the cache file
@@ -363,11 +377,13 @@ def enrich(
             f"Starting parallel enrichment for {len(repo_data_list)} repositories..."
         )
         parallel_map_and_save(
-            fn=enrich_repo_entry,
-            items=repo_data_list,
-            output_file=output_file,
-            max_workers=concurrency,
-            desc="Enriching Repos (Scraping & Analyzing Issues)",  # Desc for potential future overall progress bar
+            fn=enrich_repo_entry,  # The worker function
+            items=repo_data_list,  # Items to process
+            output_file=output_file,  # Output file path
+            max_workers=concurrency,  # Max worker processes
+            shared_cost_data=shared_cost_data,  # Pass shared dict
+            lock=shared_lock,  # Pass shared lock
+            # desc is not used by parallel_map_and_save currently
         )
 
         # Since saving is incremental, we don't collect results here.
@@ -377,6 +393,16 @@ def enrich(
         logger.info(f"  Processing attempted for {len(repo_data_list)} repositories.")
         logger.info(f"  Results written incrementally to: {output_file}")
         # We could enhance the writer process to count errors/successes if a detailed summary is critical.
+
+        # --- Log Final Costs ---
+        final_cost = shared_cost_data.get("total_cost", 0.0)
+        final_input_tokens = shared_cost_data.get("total_input_tokens", 0)
+        final_output_tokens = shared_cost_data.get("total_output_tokens", 0)
+        logger.info("--- Enrichment Cost Summary ---")
+        logger.info(f"  Total Estimated LLM Cost: ${final_cost:.6f}")
+        logger.info(f"  Total Input Tokens: {final_input_tokens}")
+        logger.info(f"  Total Output Tokens: {final_output_tokens}")
+        # --- End Log Final Costs ---
 
         logger.info(f"Enrichment process completed. Results saved to {output_file}")
         return output_file  # Return path for chaining
