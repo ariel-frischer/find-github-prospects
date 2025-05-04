@@ -3,7 +3,6 @@ import logging  # Import logging
 import multiprocessing  # Import multiprocessing
 import os  # Needed for permission checks
 import re  # Add re import for URL parsing
-import shutil
 import tempfile
 import webbrowser
 from datetime import datetime
@@ -12,12 +11,13 @@ from typing import Any, Dict, List, Optional, Set
 
 import typer
 
-# Import BrowserIssueChecker for the new command
-from .browser_checker import BrowserIssueChecker
-
 # Remove unused GitHub specific imports if not needed for rehydration anymore
 # from github import GithubException, RateLimitExceededException, Repository
-# from rich import print # Remove direct print import
+from rich import print  # Use rich print directly
+from rich.panel import Panel  # Import Panel for display
+
+# Import BrowserIssueChecker for the new command
+from .browser_checker import BrowserIssueChecker
 from .config import CACHE_DIR, CONCURRENCY, OUTPUT_DIR
 
 # Remove ContactScraper import
@@ -103,6 +103,99 @@ def _load_repo_data_from_cache(cache_file: Path) -> List[Dict[str, Any]]:
         logger.exception(f"Error loading cache file {cache_file}: {e}")
         # traceback.print_exc() # logger.exception includes traceback
         raise typer.Exit(code=1)
+
+
+def _select_generic_file(file_list: List[Path], prompt_message: str) -> Optional[Path]:
+    """Prompts user to select a file from a list."""
+    if not file_list:
+        logger.warning("No files provided for selection.")
+        return None
+
+    # Use Rich print for interactive parts
+    print(f"[bold]{prompt_message}[/bold]")
+    for i, file_path in enumerate(file_list):
+        # Show relative path for cleaner display if possible
+        try:
+            display_path = file_path.relative_to(Path.cwd())
+        except ValueError:
+            display_path = file_path
+        # Use Rich print for interactive parts
+        print(
+            f"  [cyan]{i + 1}[/]: {display_path} (Modified: {datetime.fromtimestamp(file_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M')})"
+        )
+
+    while True:
+        try:
+            choice = typer.prompt(
+                f"Enter number (1-{len(file_list)}) or 'q' to quit", type=str
+            )
+            if choice.lower() == "q":
+                logger.info("Selection cancelled.")
+                return None
+            choice_idx = int(choice) - 1
+            if 0 <= choice_idx < len(file_list):
+                return file_list[choice_idx]
+            else:
+                # Use Rich print for interactive parts
+                print("[yellow]Invalid selection. Please try again.[/yellow]")
+        except ValueError:
+            # Use Rich print for interactive parts
+            print("[yellow]Invalid input. Please enter a number or 'q'.[/yellow]")
+
+
+def _load_enriched_data(
+    enriched_file: Path,
+) -> Dict[str, Dict[int, Dict[str, Any]]]:
+    """Loads enriched data into a nested dictionary for quick lookup."""
+    enriched_data_map: Dict[str, Dict[int, Dict[str, Any]]] = {}
+    logger.info(f"Loading enriched analysis data from: {enriched_file}")
+    if not enriched_file.exists():
+        logger.warning(
+            f"Enriched file not found: {enriched_file}. Cannot display analysis during review."
+        )
+        return enriched_data_map  # Return empty map
+
+    try:
+        with enriched_file.open("r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    repo_name = data.get("full_name")
+                    issue_analysis_list = data.get("issue_analysis", [])
+
+                    if not repo_name or not isinstance(issue_analysis_list, list):
+                        logger.warning(
+                            f"Skipping invalid line {line_num} in enriched file: Missing 'full_name' or 'issue_analysis' list."
+                        )
+                        continue
+
+                    if repo_name not in enriched_data_map:
+                        enriched_data_map[repo_name] = {}
+
+                    for analysis in issue_analysis_list:
+                        if isinstance(analysis, dict) and "issue_number" in analysis:
+                            issue_num = analysis["issue_number"]
+                            enriched_data_map[repo_name][issue_num] = analysis
+                        else:
+                            logger.warning(
+                                f"Skipping invalid analysis entry on line {line_num} for repo {repo_name}: {analysis}"
+                            )
+
+                except json.JSONDecodeError:
+                    logger.warning(
+                        f"Skipping invalid JSON line {line_num} in enriched file: {line[:100]}..."
+                    )
+        logger.info(
+            f"Successfully loaded enriched data for {len(enriched_data_map)} repositories."
+        )
+        return enriched_data_map
+    except Exception as e:
+        logger.exception(f"Error loading enriched file {enriched_file}: {e}")
+        # Return empty map, review can proceed without analysis display
+        return {}
 
 
 # --- CLI Commands ---
@@ -591,62 +684,17 @@ def full_pipeline(
                 )
 
 
-def _select_cache_file() -> Optional[Path]:
-    """Finds .jsonl files in CACHE_DIR and prompts user to select one."""
-    cache_dir = Path(CACHE_DIR)
-    if not cache_dir.is_dir():
-        logger.error(f"Cache directory not found: {cache_dir}")
-        return None
-
-    logger.info(f"Searching for cache files in: {cache_dir}")
-    cache_files = sorted(
-        cache_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
-
-    if not cache_files:
-        logger.warning(f"No .jsonl cache files found in {cache_dir}.")
-        return None
-
-    # Use Rich print for interactive parts
-    print("[bold]Please select a cache file to review:[/bold]")
-    for i, file_path in enumerate(cache_files):
-        # Show relative path for cleaner display if possible
-        try:
-            display_path = file_path.relative_to(Path.cwd())
-        except ValueError:
-            display_path = file_path
-        # Use Rich print for interactive parts
-        print(
-            f"  [cyan]{i + 1}[/]: {display_path} (Modified: {datetime.fromtimestamp(file_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M')})"
-        )
-
-    while True:
-        try:
-            choice = typer.prompt(
-                f"Enter number (1-{len(cache_files)}) or 'q' to quit", type=str
-            )
-            if choice.lower() == "q":
-                logger.info("Review cancelled.")
-                return None
-            choice_idx = int(choice) - 1
-            if 0 <= choice_idx < len(cache_files):
-                return cache_files[choice_idx]
-            else:
-                # Use Rich print for interactive parts
-                print("[yellow]Invalid selection. Please try again.[/yellow]")
-        except ValueError:
-            # Use Rich print for interactive parts
-            print("[yellow]Invalid input. Please enter a number or 'q'.[/yellow]")
+# _select_cache_file is no longer needed, replaced by _select_generic_file
 
 
 @app.command()
 def review(
-    cache_file: Optional[Path] = typer.Argument(
+    input_file: Optional[Path] = typer.Argument(
         None,  # Make argument optional
-        help="Path to the raw_repos_*.jsonl cache file to review. If omitted, you will be prompted to select one.",
-        # Remove exists=True, readable=True, writable=True - check after selection/provision
+        help="Path to the ENRICHED file (e.g., enriched_*.jsonl or filtered_*.jsonl) to review. If omitted, you will be prompted.",
         file_okay=True,
         dir_okay=False,
+        # Validation happens after selection
     ),
     auto_open: bool = typer.Option(
         False,
@@ -657,36 +705,65 @@ def review(
     ),
 ) -> None:
     """
-    Interactively review individual issues within repositories listed in a cache file.
+    Interactively review issues listed in an enriched file.
 
-    If CACHE_FILE is not provided, it lists .jsonl files in the cache directory
+    If INPUT_FILE is not provided, it lists .jsonl files in the output/cache directories
     and prompts for selection.
 
+    Displays the LLM analysis for each issue from the input file.
     Opens each issue URL (optionally automatically) and prompts for approval.
-    Approved issues are added to the 'approved_issues' list. Repositories
-    where all issues have been reviewed are marked with '"reviewed": true'.
+    Approved issues are added to the 'approved_issues' list in a NEW output file
+    named 'reviewed_<input_filename>.jsonl'. Repositories where all issues
+    have been reviewed are marked with '"reviewed": true'.
     """
-    # --- Select Cache File Interactively if None Provided ---
-    if cache_file is None:
-        cache_file = _select_cache_file()
-        if cache_file is None:
-            raise typer.Exit()  # Exit if no file selected or found
+    # --- Select Input File Interactively if None Provided ---
+    if input_file is None:
+        # Look in both output and cache dirs for potential files
+        output_dir = Path(OUTPUT_DIR)
+        cache_dir = Path(CACHE_DIR)
+        potential_files = []
+        if output_dir.is_dir():
+            potential_files.extend(
+                sorted(
+                    output_dir.glob("*.jsonl"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            )
+        if cache_dir.is_dir():
+            # Add cache files, ensuring no duplicates if dirs overlap or are same
+            for cf in sorted(
+                cache_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+            ):
+                if cf not in potential_files:
+                    potential_files.append(cf)
 
-    # --- Validate selected/provided cache file ---
-    if not cache_file.exists():
-        logger.error(f"Error: Cache file not found: {cache_file}")
+        if not potential_files:
+            logger.error(f"No .jsonl files found in {output_dir} or {cache_dir}.")
+            raise typer.Exit(code=1)
+
+        input_file = _select_generic_file(
+            potential_files, "Select enriched file to review"
+        )
+        if input_file is None:
+            raise typer.Exit()  # Exit if no file selected
+
+    # --- Validate selected/provided input file ---
+    if not input_file.exists():
+        logger.error(f"Error: Input file not found: {input_file}")
         raise typer.Exit(code=1)
-    if not cache_file.is_file():
-        logger.error(f"Error: Specified path is not a file: {cache_file}")
+    if not input_file.is_file():
+        logger.error(f"Error: Specified path is not a file: {input_file}")
         raise typer.Exit(code=1)
-    # Basic read/write permission check (might not be foolproof)
-    if not os.access(cache_file, os.R_OK) or not os.access(cache_file.parent, os.W_OK):
+    # Basic read/write permission check (need write for output dir)
+    if not os.access(input_file, os.R_OK) or not os.access(input_file.parent, os.W_OK):
         logger.error(
-            f"Error: Insufficient permissions to read/write cache file or directory: {cache_file}"
+            f"Error: Insufficient permissions to read input file or write to its directory: {input_file}"
         )
         raise typer.Exit(code=1)
 
-    logger.info(f"Starting interactive issue review for: {cache_file}")
+    # Enriched data is read line-by-line, no pre-loading needed.
+    logger.info(f"Starting interactive issue review for: {input_file}")
 
     repos_processed_count = 0
     issues_reviewed_count = 0
@@ -697,17 +774,57 @@ def review(
     total_lines = 0
     skip_all_remaining = False  # Flag to skip all subsequent processing
 
-    # Use a temporary file for writing changes
-    temp_output_path = cache_file.with_suffix(cache_file.suffix + ".tmp")
+    # --- Determine Output File Path (based on INPUT file) ---
+    output_file = input_file.parent / f"reviewed_{input_file.name}"
+    logger.info(f"Review results will be written to: {output_file}")
+    # --- End Output File Path ---
+
+    # --- Load already reviewed repos if output file exists ---
+    reviewed_repo_names: Set[str] = set()
+    output_file_exists = output_file.exists()
+    if output_file_exists:
+        logger.info(
+            f"Output file {output_file} exists. Loading previously reviewed repos..."
+        )
+        try:
+            with output_file.open("r", encoding="utf-8") as f_rev:
+                for line in f_rev:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        if data.get("reviewed") is True:
+                            repo_name = data.get("full_name")
+                            if repo_name:
+                                reviewed_repo_names.add(repo_name)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            f"Skipping invalid JSON line in existing output file: {line[:100]}..."
+                        )
+            logger.info(
+                f"Loaded {len(reviewed_repo_names)} previously reviewed repository names."
+            )
+        except Exception as e:
+            logger.error(
+                f"Error reading existing output file {output_file}: {e}. Will overwrite."
+            )
+            reviewed_repo_names = set()  # Reset on error, effectively overwriting
+            output_file_exists = False  # Treat as if it doesn't exist for opening mode
 
     # Keep track of repos fully reviewed in this session
     repos_marked_reviewed_this_session = 0
 
+    output_file_handle = None  # Keep track of the handle to close it in finally
     try:
-        with (
-            cache_file.open("r", encoding="utf-8") as infile,
-            temp_output_path.open("w", encoding="utf-8") as outfile,
-        ):
+        # Open the single INPUT enriched file for reading.
+        # Open the OUTPUT file in append ('a') or write ('w') mode.
+        output_mode = "a" if output_file_exists and reviewed_repo_names else "w"
+        logger.info(f"Opening output file {output_file} in '{output_mode}' mode.")
+        output_file_handle = output_file.open(output_mode, encoding="utf-8")
+        with input_file.open("r", encoding="utf-8") as infile:
+            # Use the opened output file handle directly
+            outfile = output_file_handle
             for line_num, line in enumerate(infile, 1):
                 total_lines += 1
                 line = line.strip()
@@ -720,9 +837,16 @@ def review(
                 try:
                     data = json.loads(line)
                     repo_name = data.get("full_name", "Unknown Repo")
-                    repo_html_url = data.get("html_url")
 
-                    # --- Skip Checks ---
+                    # --- Skip if already reviewed in existing output file ---
+                    if repo_name in reviewed_repo_names:
+                        logger.info(
+                            f"Skipping Repo #{line_num} ({repo_name}): Already reviewed in {output_file.name}"
+                        )
+                        repos_skipped_count += 1
+                        continue  # Skip to next line in input file
+
+                    # --- Skip Checks (runtime flags) ---
                     if skip_all_remaining:
                         outfile.write(line + "\n")  # Write original line
                         repos_skipped_count += 1
@@ -744,26 +868,21 @@ def review(
                         outfile.write(line + "\n")  # Write original line
                         continue
 
-                    if not repo_html_url:
-                        logger.warning(
-                            f"Skipping repo on line {line_num} - missing 'html_url' for {repo_name}."
-                        )
-                        error_count += 1
-                        outfile.write(line + "\n")  # Write original line
-                        continue
-
                     # Initialize approved_issues if not present
                     if "approved_issues" not in data:
                         data["approved_issues"] = []
 
-                    found_issues = data.get("found_issues")
-                    if not isinstance(found_issues, list) or not found_issues:
+                    # Get the issue analysis list directly from the enriched data
+                    issue_analysis_list = data.get("issue_analysis")
+                    if (
+                        not isinstance(issue_analysis_list, list)
+                        or not issue_analysis_list
+                    ):
                         logger.info(
-                            f"Skipping Repo #{line_num} (No 'found_issues' list or empty list for {repo_name}). Marking as reviewed."
+                            f"Skipping Repo #{line_num} (No 'issue_analysis' list or empty list for {repo_name}). Marking as reviewed."
                         )
                         data["reviewed"] = True
-                        if "denied" in data:
-                            del data["denied"]  # Clean legacy flag
+                        # No need to handle 'denied' flag here as it's not part of enriched data
                         repos_marked_reviewed_this_session += 1
                         repos_skipped_count += 1  # Count as skipped for review purposes
                         # Write modified data back
@@ -772,24 +891,65 @@ def review(
                         continue
 
                     # --- Start Issue Review Loop ---
-                    # Use Rich print for interactive parts
                     print("-" * 20)
                     print(f"Reviewing Repo #{line_num}: [bold cyan]{repo_name}[/]")
-                    original_issues = list(
-                        found_issues
-                    )  # Create a copy to iterate over
-                    issues_in_repo_count = len(original_issues)
+                    # Iterate directly over the analysis list
+                    issues_in_repo_count = len(issue_analysis_list)
                     issues_processed_in_repo = 0
                     repo_level_skip = False  # Flag to break inner loop
 
-                    for issue_index, issue_number in enumerate(original_issues, 1):
-                        if not isinstance(issue_number, int):
-                            logger.warning(
-                                f"Skipping invalid issue entry: {issue_number}"
-                            )
-                            continue
+                    for issue_index, analysis_details in enumerate(
+                        issue_analysis_list, 1
+                    ):
+                        # Extract issue number and URL from the analysis data itself
+                        issue_number = analysis_details.get("issue_number")
+                        issue_url = analysis_details.get("issue_url")
 
-                        issue_url = f"{repo_html_url}/issues/{issue_number}"
+                        if not isinstance(issue_number, int) or not issue_url:
+                            logger.warning(
+                                f"Skipping invalid analysis entry in repo {repo_name}: Missing 'issue_number' or 'issue_url'. Analysis: {analysis_details}"
+                            )
+                            continue  # Skip this analysis entry
+
+                        # --- Display LLM Analysis ---
+                        if analysis_details:  # Check if analysis exists for this issue
+                            panel_content = ""
+                            for key, value in analysis_details.items():
+                                # Skip redundant fields or format nicely
+                                if (
+                                    key in ["issue_number", "issue_url", "error"]
+                                    and value is None
+                                ):
+                                    continue
+                                if key == "error" and value:
+                                    panel_content += f"[bold red]{key.replace('_', ' ').title()}:[/] {value}\n"
+                                elif isinstance(value, bool):
+                                    panel_content += f"[bold]{key.replace('_', ' ').title()}:[/] {'[green]Yes[/]' if value else '[yellow]No[/]'}\n"
+                                elif isinstance(value, (float, int)):
+                                    panel_content += f"[bold]{key.replace('_', ' ').title()}:[/] [cyan]{value:.2f}[/]\n"
+                                else:
+                                    panel_content += f"[bold]{key.replace('_', ' ').title()}:[/]\n{value}\n\n"
+                            # Print the panel after the loop, correctly indented
+                            print(
+                                Panel(
+                                    panel_content.strip(),
+                                    title=f"LLM Analysis for Issue #{issue_number}",
+                                    border_style="blue",
+                                    expand=False,
+                                )
+                            )
+                        else:
+                            # Correctly indented else block
+                            print(
+                                Panel(
+                                    "[yellow]LLM analysis not found for this issue.[/]",
+                                    title=f"Issue #{issue_number}",
+                                    border_style="yellow",
+                                    expand=False,
+                                )
+                            )
+                        # --- End Display LLM Analysis ---
+
                         # Use Rich print for interactive parts
                         print(
                             f"  Reviewing Issue {issue_index}/{issues_in_repo_count}: [bold magenta]#{issue_number}[/]"
@@ -930,19 +1090,17 @@ def review(
             # --- End of File Loop (inside 'with' blocks) ---
 
             # --- Final operations after loop (still inside main 'try') ---
-            # If loop finished OR exited via 'q', save progress by moving temp file
-            # This needs to be inside the main try block to be caught by outer except/finally
-            shutil.move(str(temp_output_path), str(cache_file))
+            # No need to move temp file, writing was direct
             logger.info("Review process finished.")
             if skip_all_remaining:
                 logger.info("  (Skipped remaining items as requested)")
             logger.info("--- Review Summary ---")
-            logger.info(f"  Total lines in file: {total_lines}")
+            logger.info(f"  Total lines read from input file: {total_lines}")
             logger.info(
-                f"  Repos skipped (already reviewed/denied/sr/sa): {repos_skipped_count}"
+                f"  Repos skipped (previously reviewed/runtime skip): {repos_skipped_count}"
             )
             logger.info(
-                f"  Repos newly marked as reviewed: {repos_marked_reviewed_this_session}"
+                f"  Repos newly reviewed in this session: {repos_marked_reviewed_this_session}"
             )
             logger.info(
                 f"  Total issues reviewed (approved/denied): {issues_reviewed_count}"
@@ -950,59 +1108,40 @@ def review(
             logger.info(f"  Issues denied: {issues_denied_count}")  # Updated label
             logger.info(f"  Issues skipped ('s' action): {issues_skipped_count}")
             logger.info(f"  Lines with errors: {error_count}")
-            logger.info(f"Updated cache file: {cache_file}")
+            logger.info(f"Reviewed results saved to: {output_file}")
 
     # --- Outer Try/Except/Finally for the whole command ---
-    except typer.Exit as e:  # Correct indentation
+    except typer.Exit as e:
         # Handle graceful exit via 'q' or other Exit calls
-        # Check if the Exit exception has a code attribute
-        exit_code = getattr(e, "code", 0)  # Default to 0 if no code attribute
-
+        exit_code = getattr(e, "code", 0)
         if exit_code == 0:
             logger.info("Exited review process cleanly.")
         else:
             logger.warning(f"Review process exited with code {exit_code}.")
-            # Consider leaving temp file if exit code indicates error
-            if temp_output_path.exists():
-                logger.warning(f"Partial results might be in: {temp_output_path}")
-        # Note: The finally block in the outer try/except/finally structure
-        # should handle the file move correctly even on Exit.
+        # Output file should be closed by the finally block
 
-    except KeyboardInterrupt:  # Correct indentation
-        logger.warning("Keyboard interrupt detected. Saving progress...")
-        # Attempt to save progress by moving temp file if it exists
-        if temp_output_path.exists():
-            try:
-                shutil.move(str(temp_output_path), str(cache_file))
-                logger.info(f"Progress saved to: {cache_file}")
-            except Exception as move_err:
-                logger.error(f"Error saving progress on interrupt: {move_err}")
-                logger.warning(f"Partial results might be in: {temp_output_path}")
-        else:
-            logger.info("No temporary file found to save.")
+    except KeyboardInterrupt:
+        logger.warning("Keyboard interrupt detected.")
+        logger.info(f"Partial review results saved in: {output_file}")
+        # File will be closed by finally block
         raise typer.Exit(code=130)  # Standard exit code for Ctrl+C
-    except Exception as e:  # Correct indentation
-        logger.exception(f"An error occurred during review: {e}")
-        # traceback.print_exc() # logger.exception includes traceback
-        # Attempt cleanup, but prioritize not losing data
-        if temp_output_path.exists():
-            logger.warning(
-                f"Review process failed. Partial results might be in {temp_output_path}. Original file {cache_file} remains unchanged."
-            )
-            # Consider *not* deleting the temp file automatically on error
-            # try:
-            #     temp_output_path.unlink()
-            #     logger.info(f"Cleaned up temporary file due to error: {temp_output_path}")
-            # except Exception as del_err:
-            #     logger.warning(f"Could not delete temporary file {temp_output_path} after error: {del_err}")
+
+    except Exception as e:
+        logger.exception(f"An unexpected error occurred during review: {e}")
+        logger.error(
+            f"Review process failed. Partial results might be in {output_file}."
+        )
+        # File will be closed by finally block
         raise typer.Exit(code=1)
+
     finally:
-        # Ensure temp file is removed *only if it wasn't successfully moved* and *no major error occurred*
-        # This logic is tricky. Let's be conservative and leave the temp file if the move didn't happen
-        # unless it was explicitly handled (like in KeyboardInterrupt or normal exit).
-        # The current logic moves the file on success/quit/interrupt, so we only need to worry about unexpected Exceptions.
-        # In case of unexpected Exception, we now leave the temp file.
-        pass  # Simplified cleanup logic - rely on move happening correctly
+        # Ensure the output file handle is closed if it was opened
+        if output_file_handle and not output_file_handle.closed:
+            try:
+                output_file_handle.close()
+                logger.debug("Output file handle closed.")
+            except Exception as close_err:
+                logger.error(f"Error closing output file {output_file}: {close_err}")
 
 
 @app.command()
