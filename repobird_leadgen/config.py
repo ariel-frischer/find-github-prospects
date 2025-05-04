@@ -18,3 +18,8 @@ OUTPUT_DIR: Final[str] = os.getenv("OUTPUT_DIR", "output")
 ENRICHER_LLM_MODEL: Final[str] = os.getenv(
     "ENRICHER_LLM_MODEL", "openrouter/google/gemini-2.5-pro-preview-03-25"
 )
+
+# LLM model specifically for URL summarization
+SUMMARIZER_LLM_MODEL: Final[str] = os.getenv(
+    "SUMMARIZER_LLM_MODEL", "openrouter/google/gemini-2.5-flash-preview"
+)

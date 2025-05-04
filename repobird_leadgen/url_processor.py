@@ -1,7 +1,6 @@
 import json
 import logging
 import multiprocessing  # Import for Lock type hint
-import os
 import re
 import traceback
 from typing import Dict, List, Optional
@@ -12,17 +11,14 @@ from bs4 import BeautifulSoup
 from goose3 import Goose
 from pydantic import ValidationError
 
+# Import configuration for model name
+from .config import SUMMARIZER_LLM_MODEL
+
 # Import the new Pydantic model and cost tracking helper
 from .models import UrlSummarySchema
 from .utils import CostDataType, _update_shared_cost  # Import helper and type hint
 
 # --- Configuration ---
-# LLM specifically for URL summarization (Enricher uses ENRICHER_LLM_MODEL from config)
-# Use Gemini 2.5 Flash Preview as the default
-SUMMARIZER_LLM_MODEL = os.getenv(
-    "SUMMARIZER_LLM_MODEL",
-    "openrouter/google/gemini-2.5-flash-preview",  # Updated default
-)
 MAX_CONTENT_LENGTH_FOR_SUMMARY = 200000  # Limit input to summarizer LLM
 
 # Get logger for this module
